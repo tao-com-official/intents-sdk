@@ -1,7 +1,6 @@
 # @tao-com-official/intents-sdk
 
-Browser-first TypeScript SDK for [TAO Intents](https://github.com/tao-com-official/tao-docs/tree/main/docs/intents).
-It hides the Quoter API and the Intents smart contract behind a few calls: quote, approve, open, track.
+TypeScript SDK for [TAO.com Intents](https://docs.tao.com/intents/).
 
 ```bash
 npm install @tao-com-official/intents-sdk viem
@@ -147,38 +146,6 @@ new TaoIntents({
   fillWindowSeconds: 300,              // default fill deadline (max 1 day)
   chains: { 1: { intents: "0x...", rpcUrl: "http://127.0.0.1:8545" } }, // e.g. an anvil fork
 });
-```
-
-The docs describe how to [test against an anvil fork](https://github.com/tao-com-official/tao-docs/blob/main/docs/intents/integration-guide.md#testing-without-real-funds);
-the `chains` override plus a fork `rpcUrl` is how you point the SDK at one. There is no API key anywhere.
-
-## What the SDK handles for you
-
-- **Order encoding**: `InputOrderData` as a single ABI tuple, zero swap fields for a USDC input, left-padded recipient,
-  `subtensorData = 0x`. `ONCHAIN_ORDER_DATA_TYPEHASH` is read from the contract, never hardcoded.
-- **Fee guard**: `protocolFeeBps` is read with the quote and used as `maxProtocolFeeBps`, so a fee change after quoting
-  reverts (readable error) instead of silently costing more.
-- **Quote hygiene**: `outputAmount` goes into the order unchanged; `inputAmount`, `fillDeadline`, `outputToken`,
-  `destinationChainId` and `recipient` are the exact values sent to the Quoter.
-- **Safety checks**: `user` must be the connected account; balance is checked; `open` is simulated before the user pays
-  gas; `validUntil` is re-checked immediately before sending.
-- **Wallet plumbing**: chain switching (with `wallet_addEthereumChain` for Subtensor EVM), exact-amount approvals.
-- **Status**: `fillRecords` on the destination plus `orderStatus` on the origin. This avoids `eth_getLogs` range limits
-  on public RPCs.
-
-## Scope
-
-Covers what the [TAO docs](https://github.com/tao-com-official/tao-docs/tree/main/docs/intents) document: USDC in,
-EVM-address recipient out. Swapped inputs, Substrate coldkey delivery and subnet (Alpha) tokens are intentionally not
-covered (the contract paths for them are undocumented publicly).
-
-## Development
-
-```bash
-npm install
-npm run typecheck
-npm test
-npm run build
 ```
 
 ## License
