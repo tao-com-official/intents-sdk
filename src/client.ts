@@ -213,6 +213,8 @@ export class TaoIntents {
       recipient,
       fillDeadline,
       validUntil: response.quote.validUntil,
+      inputUsd: response.quote.preview.inputs[0]?.userPaysUsd,
+      outputUsd: response.quote.preview.outputs[0]!.userReceivesUsd,
       protocolFeeBps,
       fees: response.fees,
       raw: response,
@@ -336,12 +338,17 @@ export class TaoIntents {
     // Approve first: the approval must be mined, and it would burn the quote's ~60s window.
     const prepared = await this.#prepareOrigin({ origin, wallet, amount, signal, onProgress });
 
+    // `prepare` already reported chain switching and the balance check; keep `open` from repeating them.
+    const openProgress: CallOptions["onProgress"] = (e) => {
+      if (e.step !== "switching-chain" && e.step !== "checking-balance") onProgress?.(e);
+    };
+
     for (let attempt = 0; ; attempt++) {
       onProgress?.({ step: "quoting" });
       const quote = await this.getQuote({ ...quoteParams, user: wallet.account }, { signal });
       onProgress?.({ step: "quoted", quote });
       try {
-        const result = await this.open({ quote, wallet: wallet.client, signal, onProgress });
+        const result = await this.open({ quote, wallet: wallet.client, signal, onProgress: openProgress });
         return { ...result, approvalTxHash: result.approvalTxHash ?? prepared.approvalTxHash, quote };
       } catch (error) {
         if (error instanceof QuoteExpiredError && attempt < maxQuoteRetries) {

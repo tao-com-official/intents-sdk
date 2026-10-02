@@ -13,8 +13,8 @@ export function quoterBody(outputAmount = "320584403022379535", validUntil = NOW
     quote: {
       validUntil,
       preview: {
-        inputs: [{ asset: "0x0001", amount: "100000000" }],
-        outputs: [{ asset: "0x0002", amount: outputAmount }],
+        inputs: [{ asset: "0x0001", amount: "100000000", userPaysUsd: "99.99" }],
+        outputs: [{ asset: "0x0002", amount: outputAmount, userReceivesUsd: "98.03" }],
       },
     },
     fees: { totalUsd: "1.96", effectiveRateBps: 196 },

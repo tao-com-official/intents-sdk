@@ -16,7 +16,10 @@ export interface QuoterRequest {
 export interface QuoterResponse {
   quote: {
     validUntil: number;
-    preview: { inputs: Array<{ asset: string; amount: string }>; outputs: Array<{ asset: string; amount: string }> };
+    preview: {
+      inputs: Array<{ asset: string; amount: string; userPaysUsd?: string }>;
+      outputs: Array<{ asset: string; amount: string; userReceivesUsd?: string }>;
+    };
   };
   fees?: QuoterFees;
 }
@@ -84,11 +87,16 @@ async function attemptQuote(
     });
   } catch (cause) {
     if (signal?.aborted) throw new AbortedError();
+    if (timedOut) {
+      throw new QuoterError({ status: 0, message: "The quote request timed out. Please retry.", retryable: true, cause });
+    }
+    // A browser reports CORS rejections and blocked origins as the same opaque network error as being
+    // offline, so we can't tell them apart. Say so instead of blaming the user's connection only.
     throw new QuoterError({
+      code: "QUOTER_UNREACHABLE",
       status: 0,
-      message: timedOut
-        ? "The quote request timed out. Please retry."
-        : "Couldn't reach the quote service. Check your connection and retry.",
+      message:
+        "Couldn't reach the quote service. This is either a network problem or the service is blocking requests from this site's origin (CORS / allow-list).",
       retryable: true,
       cause,
     });
@@ -137,6 +145,9 @@ function toQuoterError(status: number, body: unknown, text: string): QuoterError
           : "No quote is available for this route and amount. Check the tokens, try a different amount, or retry later.";
   } else if (apiError && MESSAGES[apiError]) {
     message = MESSAGES[apiError]!;
+  } else if (status === 403) {
+    message =
+      "The quote service refused this request (403 Forbidden). This site's origin or network is likely blocked.";
   } else if (status === 400) {
     message = `Invalid quote request${detail ? `: ${detail}` : "."}`;
   } else {
@@ -149,7 +160,14 @@ function toQuoterError(status: number, body: unknown, text: string): QuoterError
     (status === 503 && apiError !== "SETTLER_PAUSED") ||
     (status === 502 && apiError === "SOLVER_FANOUT_FAILED");
 
-  return new QuoterError({ status, apiError, message, failures: b.failures, retryable });
+  return new QuoterError({
+    code: status === 403 ? "QUOTER_FORBIDDEN" : undefined,
+    status,
+    apiError,
+    message,
+    failures: b.failures,
+    retryable,
+  });
 }
 
 function firstCode(failures?: QuoterFailure[]): string {

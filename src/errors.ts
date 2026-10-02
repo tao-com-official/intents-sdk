@@ -3,6 +3,8 @@ export type TaoIntentsErrorCode =
   | "INVALID_PARAMS"
   | "UNSUPPORTED_ROUTE"
   | "QUOTER_ERROR"
+  | "QUOTER_FORBIDDEN"
+  | "QUOTER_UNREACHABLE"
   | "QUOTE_EXPIRED"
   | "INDICATIVE_QUOTE"
   | "INSUFFICIENT_BALANCE"
@@ -62,8 +64,14 @@ export class QuoterError extends TaoIntentsError {
   readonly retryable: boolean;
   /** True when the Intents contract on this route is paused. */
   readonly paused: boolean;
+  /**
+   * True when the request was refused (HTTP 403) or never got a response in a browser.
+   * Often means the quote service blocks this site's origin; contact TAO to get it allow-listed.
+   */
+  readonly blocked: boolean;
 
   constructor(init: {
+    code?: "QUOTER_ERROR" | "QUOTER_FORBIDDEN" | "QUOTER_UNREACHABLE";
     status: number;
     apiError?: string;
     message: string;
@@ -71,12 +79,13 @@ export class QuoterError extends TaoIntentsError {
     retryable: boolean;
     cause?: unknown;
   }) {
-    super("QUOTER_ERROR", init.message, { cause: init.cause });
+    super(init.code ?? "QUOTER_ERROR", init.message, { cause: init.cause });
     this.status = init.status;
     this.apiError = init.apiError;
     this.failures = init.failures ?? [];
     this.retryable = init.retryable;
     this.paused = init.apiError === "SETTLER_PAUSED";
+    this.blocked = init.code === "QUOTER_FORBIDDEN" || init.code === "QUOTER_UNREACHABLE";
   }
 }
 

@@ -53,6 +53,9 @@ describe("getQuote", () => {
       outputAmountFormatted: "0.320584403022379535",
       validUntil: NOW + 60,
       protocolFeeBps: 30,
+      inputUsd: "99.99",
+      outputUsd: "98.03",
+      fees: { totalUsd: "1.96", effectiveRateBps: 196 },
     });
   });
 
@@ -100,7 +103,6 @@ describe("open / execute", () => {
     expect(steps).toEqual([
       "switching-chain", "checking-balance", "approval-required", "approval-submitted", "approval-confirmed",
       "quoting", "quoted",
-      "switching-chain", "checking-balance", // open() re-verifies; the approval is now in place
       "awaiting-signature", "submitted", "confirmed",
     ]);
     expect((wallet.writeContract.mock.calls as unknown as unknown[][])[0]![0]).toMatchObject({ functionName: "approve", args: [ETH_INTENTS, 100_000_000n] });

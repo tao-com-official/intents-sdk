@@ -56,6 +56,9 @@ const quote = await intents.getQuote({
 
 quote.outputAmountFormatted; // "0.3172..."
 quote.validUntil;            // unix seconds, ~60s ahead
+quote.inputUsd;              // "99.991607"  (informational)
+quote.outputUsd;             // "98.036613"
+quote.fees;                  // typed breakdown: totalUsd, effectiveRateBps, serviceUsd, solverUsd, fillGasUsd, ...
 intents.isQuoteExpired(quote, 15); // reserve 15s for the user to sign
 
 // Optional: approve ahead of time so the quote window isn't spent on an approval.
@@ -113,6 +116,8 @@ Every failure is a `TaoIntentsError` with a stable `code`; nothing is opened on-
 | `InvalidParamsError` | `INVALID_PARAMS` | Fix the input (bad address, amount, deadline). |
 | `UnsupportedRouteError` | `UNSUPPORTED_ROUTE` | Unknown chain/token, same-chain, non-USDC input. |
 | `QuoterError` | `QUOTER_ERROR` | Has `status`, `apiError`, `failures`, `retryable`, `paused`. |
+| `QuoterError` | `QUOTER_FORBIDDEN` | HTTP 403: your origin/network is blocked. Not retryable; `blocked` is `true`. |
+| `QuoterError` | `QUOTER_UNREACHABLE` | No response at all. In a browser this is either being offline or a CORS / allow-list block (indistinguishable), so the message says both. `blocked` is `true`. |
 | `QuoteExpiredError` | `QUOTE_EXPIRED` | Request a new quote. |
 | `IndicativeQuoteError` | `INDICATIVE_QUOTE` | Re-quote with `user`. |
 | `InsufficientBalanceError` | `INSUFFICIENT_BALANCE` | Has `required` / `available`. |

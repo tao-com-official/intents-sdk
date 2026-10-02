@@ -59,7 +59,22 @@ describe("requestQuote", () => {
   it("reports network failures as retryable status 0", async () => {
     const f = vi.fn(async () => { throw new TypeError("fetch failed"); });
     const err = await requestQuote(request, opts(f as never)).catch((e) => e);
-    expect(err).toMatchObject({ status: 0, retryable: true });
+    expect(err).toMatchObject({ status: 0, retryable: true, code: "QUOTER_UNREACHABLE", blocked: true });
+    expect(err.message).toContain("blocking");
+  });
+
+  it("reports timeouts separately from blocked origins", async () => {
+    const f = vi.fn((_u: string, init: RequestInit) => new Promise<Response>((_, rej) => init.signal!.addEventListener("abort", () => rej(new Error("aborted")))));
+    const err = await requestQuote(request, { ...opts(f as never), timeoutMs: 10 }).catch((e) => e);
+    expect(err).toMatchObject({ status: 0, code: "QUOTER_ERROR", blocked: false, retryable: true });
+    expect(err.message).toContain("timed out");
+  });
+
+  it("reports 403 as forbidden and does not retry it", async () => {
+    const f = vi.fn(async () => new Response("<html>Forbidden</html>", { status: 403 }));
+    const err = await requestQuote(request, opts(f as never, 3)).catch((e) => e);
+    expect(err).toMatchObject({ status: 403, code: "QUOTER_FORBIDDEN", blocked: true, retryable: false });
+    expect(f).toHaveBeenCalledTimes(1);
   });
 
   it("rejects malformed success bodies", async () => {

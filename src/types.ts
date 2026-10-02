@@ -36,10 +36,34 @@ export interface QuoteParams {
   fillDeadline?: number;
 }
 
+/**
+ * Cost breakdown from the Quoter. Informational: the Quoter documents these fields as non-contractual,
+ * so every key is optional. USD values are decimal strings (e.g. `"1.963386"`); `*Bps` values are numbers.
+ * Only `outputAmount` is binding; the output amount already includes all of these costs.
+ */
 export interface QuoterFees {
+  /** USD value of the input being sold. */
   sellUsd?: string;
+  /** Total cost of the transfer in USD. */
   totalUsd?: string;
+  /** Total cost as basis points of the input (196 = 1.96%). */
   effectiveRateBps?: number;
+  /** Total cost expressed in input-token base units (USDC, 6 decimals). */
+  totalInSellToken?: string;
+  /** Network fee on the origin chain, in rao and USD. */
+  originNetworkFeeRao?: string;
+  originNetworkFeeUsd?: string;
+  /** Pool fee plus price impact of swapping into the output token. */
+  poolFeeAndImpactUsd?: string;
+  poolSlippageBps?: number;
+  /** Difference between spot price and the quoted price. */
+  spotBasisUsd?: string;
+  /** TAO protocol fee. */
+  serviceUsd?: string;
+  /** Solver margin. */
+  solverUsd?: string;
+  /** Gas the solver pays to fill on the destination chain. */
+  fillGasUsd?: string;
   [key: string]: unknown;
 }
 
@@ -62,7 +86,10 @@ export interface Quote {
   validUntil: number;
   /** Protocol fee (bps) read when the quote was requested. It caps the fee in the order, so a fee change forces a re-quote. */
   protocolFeeBps: number | undefined;
-  /** Informational cost breakdown from the Quoter. Don't build logic on it. */
+  /** USD value of what the user pays / receives, when the Quoter provides it. Informational. */
+  inputUsd: string | undefined;
+  outputUsd: string | undefined;
+  /** Informational cost breakdown (see `QuoterFees`). Display it, but don't build logic on it. */
   fees: QuoterFees | undefined;
   /** The untouched Quoter API response. */
   raw: unknown;
