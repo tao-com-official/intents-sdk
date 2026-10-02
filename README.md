@@ -1,9 +1,9 @@
-# @tao-com-official/intents-sdk
+# @tao.com/intents-sdk
 
 TypeScript SDK for [TAO.com Intents](https://docs.tao.com/intents/).
 
 ```bash
-npm install @tao-com-official/intents-sdk viem
+npm install @tao.com/intents-sdk viem
 ```
 
 `viem` is a peer dependency (v2). The SDK is ESM + CJS, has no Node-only dependencies, and works with any
@@ -12,7 +12,7 @@ EIP-1193 wallet (`window.ethereum`, WalletConnect, Coinbase, wagmi/RainbowKit co
 ## Quick start
 
 ```ts
-import { TaoIntents } from "@tao-com-official/intents-sdk";
+import { TaoIntents } from "@tao.com/intents-sdk";
 
 const intents = new TaoIntents({
   rpcUrls: { 1: "https://YOUR-ETHEREUM-RPC" }, // recommended for production
@@ -152,6 +152,23 @@ new TaoIntents({
   chains: { 1: { intents: "0x...", rpcUrl: "http://127.0.0.1:8545" } }, // e.g. an anvil fork
 });
 ```
+
+## Publishing
+
+Releases publish publicly to npm under the `tao.com` organization.
+
+For the initial release, an authorized organization member must sign in to npm,
+run `npm ci`, and publish the reviewed version with `npm publish`. The
+`prepublishOnly` script runs typechecking, tests, and the build before publishing.
+
+Then configure a GitHub Actions trusted publisher in the npm package settings:
+GitHub organization `tao-com-official`, repository `intents-sdk`, workflow
+`publish.yml`, no environment, and allow direct `npm publish`.
+
+For subsequent releases, merge a version bump in both `package.json` and
+`package-lock.json`, then manually run **Publish to npm** from `main` in GitHub
+Actions. The workflow uses OIDC on a GitHub-hosted runner; no npm token is needed.
+Already-published versions cannot be overwritten.
 
 ## License
 
