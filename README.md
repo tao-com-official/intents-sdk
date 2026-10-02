@@ -153,23 +153,6 @@ new TaoIntents({
 });
 ```
 
-## Publishing
-
-Releases publish publicly to npm under the `tao.com` organization.
-
-For the initial release, an authorized organization member must sign in to npm,
-run `npm ci`, and publish the reviewed version with `npm publish`. The
-`prepublishOnly` script runs typechecking, tests, and the build before publishing.
-
-Then configure a GitHub Actions trusted publisher in the npm package settings:
-GitHub organization `tao-com-official`, repository `intents-sdk`, workflow
-`publish.yml`, no environment, and allow direct `npm publish`.
-
-For subsequent releases, merge a version bump in both `package.json` and
-`package-lock.json`, then manually run **Publish to npm** from `main` in GitHub
-Actions. The workflow uses OIDC on a GitHub-hosted runner; no npm token is needed.
-Already-published versions cannot be overwritten.
-
 ## License
 
 MIT
