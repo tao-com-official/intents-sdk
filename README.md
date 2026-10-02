@@ -1,9 +1,9 @@
-# @tao-com-official/intents-sdk
+# @tao.com/intents-sdk
 
 TypeScript SDK for [TAO.com Intents](https://docs.tao.com/intents/).
 
 ```bash
-npm install @tao-com-official/intents-sdk viem
+npm install @tao.com/intents-sdk viem
 ```
 
 `viem` is a peer dependency (v2). The SDK is ESM + CJS, has no Node-only dependencies, and works with any
@@ -12,7 +12,7 @@ EIP-1193 wallet (`window.ethereum`, WalletConnect, Coinbase, wagmi/RainbowKit co
 ## Quick start
 
 ```ts
-import { TaoIntents } from "@tao-com-official/intents-sdk";
+import { TaoIntents } from "@tao.com/intents-sdk";
 
 const intents = new TaoIntents({
   rpcUrls: { 1: "https://YOUR-ETHEREUM-RPC" }, // recommended for production
