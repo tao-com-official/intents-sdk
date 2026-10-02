@@ -3,7 +3,6 @@
   "version": "0.1.0",
   "description": "Browser-first TypeScript SDK for TAO Intents: get a quote and open a cross-chain intent without touching the Quoter API or the smart contract directly.",
   "license": "MIT",
-  "private": true,
   "type": "module",
   "sideEffects": false,
   "main": "./dist/index.cjs",
