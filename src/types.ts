@@ -30,8 +30,11 @@ export interface QuoteParams {
   /** Who receives the output on the destination chain. Defaults to `user`. */
   recipient?: Address;
   /**
-   * Unix time (seconds) by which the intent must be filled. Must be in the future and at most 1 day away.
-   * Defaults to now + `fillWindowSeconds` (5 minutes unless configured otherwise).
+   * Unix time (seconds) by which the intent must be filled: between 60 seconds and 1 day from now.
+   * Defaults to now + `fillWindowSeconds` (5 minutes unless configured otherwise). When you leave it
+   * unset, `open` moves the deadline forward to a fresh window right before the wallet signs, so a user
+   * who dawdles on the review screen doesn't end up with a nearly-expired order. Set it only if you need
+   * a fixed deadline; then `open` fails instead of sending an order that has under 60s left.
    */
   fillDeadline?: number;
 }
@@ -82,6 +85,8 @@ export interface Quote {
   user: Address | undefined;
   recipient: Address | undefined;
   fillDeadline: number;
+  /** True when the caller pinned `fillDeadline`. Otherwise `open` refreshes it just before signing. */
+  fillDeadlineIsExplicit: boolean;
   /** Unix time (seconds) until which the quote holds (~60s). */
   validUntil: number;
   /** Protocol fee (bps) read when the quote was requested. It caps the fee in the order, so a fee change forces a re-quote. */
@@ -104,7 +109,7 @@ export type ProgressEvent =
   | { step: "approval-confirmed"; txHash: Hash }
   | { step: "quoting" }
   | { step: "quoted"; quote: Quote }
-  | { step: "quote-refreshing"; reason: "expired" }
+  | { step: "quote-refreshing"; reason: "expired" | "approval" }
   | { step: "awaiting-signature" }
   | { step: "submitted"; txHash: Hash }
   | { step: "confirmed"; txHash: Hash; orderId: Hex };

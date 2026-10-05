@@ -14,11 +14,18 @@ export type TaoIntentsErrorCode =
   | "TRANSACTION_REVERTED"
   | "WALLET_ERROR"
   | "ORDER_NOT_FOUND"
+  | "OUTPUT_BELOW_MINIMUM"
+  | "TRANSACTION_REPLACED"
   | "ABORTED"
   | "TIMEOUT";
 
 export class TaoIntentsError extends Error {
   readonly code: TaoIntentsErrorCode;
+  /**
+   * Set by `execute` when the failure happened *after* its USDC approval was mined. The approval is
+   * not wasted: the allowance stays, so calling `execute` again won't ask the user to approve again.
+   */
+  approvalTxHash?: `0x${string}`;
 
   constructor(code: TaoIntentsErrorCode, message: string, options?: { cause?: unknown }) {
     super(message, options);
@@ -163,8 +170,50 @@ export class OrderNotFoundError extends TaoIntentsError {
 }
 
 export class AbortedError extends TaoIntentsError {
-  constructor(message = "The operation was aborted.") {
-    super("ABORTED", message);
+  /**
+   * Set if the abort happened after a transaction was already sent. That transaction is NOT cancelled;
+   * use `getOrderByTransaction` with this hash to recover the order if it lands.
+   */
+  readonly txHash: `0x${string}` | undefined;
+  constructor(message?: string, txHash?: `0x${string}`) {
+    super(
+      "ABORTED",
+      message ??
+        (txHash
+          ? `Stopped waiting, but transaction ${txHash} was already sent and may still be mined.`
+          : "The operation was aborted."),
+    );
+    this.txHash = txHash;
+  }
+}
+
+/** The quote's output is below the caller's minimum (`minOutputAmount` / `slippageBps`). Nothing was sent. */
+export class OutputBelowMinimumError extends TaoIntentsError {
+  readonly quoted: bigint;
+  readonly minimum: bigint;
+  constructor(quoted: bigint, minimum: bigint) {
+    super(
+      "OUTPUT_BELOW_MINIMUM",
+      `The quoted output (${quoted}) is below the minimum you set (${minimum}). Nothing was sent; request a new quote.`,
+    );
+    this.quoted = quoted;
+    this.minimum = minimum;
+  }
+}
+
+/** The transaction was cancelled or replaced by a different one (e.g. from the wallet's "cancel"). */
+export class TransactionReplacedError extends TaoIntentsError {
+  readonly reason: "cancelled" | "replaced";
+  readonly originalTxHash: `0x${string}`;
+  readonly replacementTxHash: `0x${string}`;
+  constructor(reason: "cancelled" | "replaced", originalTxHash: `0x${string}`, replacementTxHash: `0x${string}`, what: string) {
+    super(
+      "TRANSACTION_REPLACED",
+      `The ${what} transaction was ${reason} (replaced by ${replacementTxHash}). No intent was opened by it.`,
+    );
+    this.reason = reason;
+    this.originalTxHash = originalTxHash;
+    this.replacementTxHash = replacementTxHash;
   }
 }
 

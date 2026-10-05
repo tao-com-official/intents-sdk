@@ -34,10 +34,53 @@ const result = await order.waitForSettlement(); // 'filled' | 'refunded'
 console.log(result.state);
 ```
 
-`execute` does everything in the right order: connects the wallet, switches (or adds) the chain, checks the
-USDC balance, approves exactly the input amount if needed, **then** requests the quote (approvals must be mined
-first or they eat the ~60s quote window), simulates `open`, sends it, and reads the order ID from the receipt.
-If the quote expires while the user is in the wallet prompt it automatically requests a fresh one.
+`execute` does everything in the right order:
+
+1. connects the wallet, switches (or adds) the chain, and checks the USDC balance;
+2. requests a **first quote before any approval**, so a failed quote (rate limit, no liquidity, bad route) never costs
+   the user an approval transaction;
+3. approves exactly the input amount if needed, then **reuses that quote**: an approval mines in seconds and a quote
+   lasts ~60s. Only if less than ~20s of it is left does it take a fresh one. With enough allowance there is just
+   one quote and no approval;
+4. simulates `open`, sends it, and reads the order ID from the receipt of the transaction that was actually mined.
+
+If the quote expires while the user is in the wallet prompt it requests a new one automatically.
+
+**If something fails after the approval** (for example a re-quote is rate limited), the approval can't be undone, but
+it isn't wasted: the allowance stays. The thrown error has `approvalTxHash` set so your UI can say "approved, try
+again", and calling `execute` again skips the approval.
+
+```ts
+try { await intents.execute({ ... }); }
+catch (e) { if (isTaoIntentsError(e) && e.approvalTxHash) showRetry("USDC approved, please try again"); }
+```
+
+### Controlling the output
+
+The order delivers exactly the quoted amount (asking for more risks never being filled), so you control the
+output by *refusing* quotes that are too low. Nothing is signed when a limit is violated; you get
+`OutputBelowMinimumError` (`quoted`, `minimum`).
+
+```ts
+await intents.execute({
+  ...,
+  minOutputAmount: 300_000_000_000_000_000n, // never deliver less than 0.3 TAO (base units)
+  slippageBps: 50,                           // a re-quote may be at most 0.5% worse than the one the user saw (default 100)
+});
+```
+
+### Cancelling
+
+Pass an `AbortSignal` to `execute`, `open`, `ensureApproval` or `getQuote`. The SDK stops waiting at any step.
+It can't close a wallet prompt that is already showing or withdraw a transaction that was already sent: if you
+abort after sending, `AbortedError.txHash` is set and `intents.getOrderByTransaction(chainId, txHash)` recovers the order.
+
+### Fill deadline
+
+`fillDeadline` must be 60 seconds to 1 day ahead (`fillWindowSeconds` defaults to 300 and is validated the same way).
+Unless you pin `fillDeadline` yourself, `open` moves it to a fresh window right before the wallet signs (as the TAO
+frontend does), so lingering on the review screen doesn't leave the order with little time. If you do pin it, `open`
+refuses to send an order with under 60s left.
 
 ## Showing a quote first
 
@@ -127,7 +170,9 @@ Every failure is a `TaoIntentsError` with a stable `code`; nothing is opened on-
 | `TransactionRevertedError` | `TRANSACTION_REVERTED` | Mined but reverted; has `txHash`. |
 | `WalletError` | `WALLET_ERROR` | Wallet/network problem. |
 | `OrderNotFoundError` | `ORDER_NOT_FOUND` | Wrong chain, or hash isn't an intent. |
-| `AbortedError` / `TimeoutError` | `ABORTED` / `TIMEOUT` | Your `signal` / `timeoutMs`. |
+| `OutputBelowMinimumError` | `OUTPUT_BELOW_MINIMUM` | Your `minOutputAmount` / `slippageBps` guard. Nothing was sent. |
+| `TransactionReplacedError` | `TRANSACTION_REPLACED` | The user cancelled or replaced the transaction in the wallet; no intent was opened. |
+| `AbortedError` / `TimeoutError` | `ABORTED` / `TIMEOUT` | Your `signal` / `timeoutMs`. `AbortedError.txHash` is set if a tx was already sent. |
 
 ```ts
 try {
@@ -148,7 +193,7 @@ new TaoIntents({
   quoterUrl: "https://www.tao.com/api/v1/intents/quotes",
   quoterTimeoutMs: 15_000,
   quoterRetries: 1,                    // transient failures only; rate limits are never auto-retried
-  fillWindowSeconds: 300,              // default fill deadline (max 1 day)
+  fillWindowSeconds: 300,              // default fill window (60s to 1 day)
   chains: { 1: { intents: "0x...", rpcUrl: "http://127.0.0.1:8545" } }, // e.g. an anvil fork
 });
 ```

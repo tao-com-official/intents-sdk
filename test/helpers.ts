@@ -65,6 +65,10 @@ export interface MockChainState {
   fillRecord?: Hex;
   orderStatus?: number;
   simulateError?: unknown;
+  /** Receipt waits never resolve (to test abort). */
+  hangReceipt?: boolean;
+  /** The wallet replaced the sent tx: the mined one has this hash. */
+  replacement?: { reason: "repriced" | "cancelled" | "replaced"; hash: Hex; logs?: unknown[] };
   logs?: ReturnType<typeof openLog>[];
 }
 
@@ -86,11 +90,16 @@ export function mockPublicClient(state: MockChainState = {}) {
       if (s.simulateError) throw s.simulateError;
       return {};
     }),
-    waitForTransactionReceipt: vi.fn(async ({ hash }: { hash: Hex }) => ({
-      status: "success" as const,
-      transactionHash: hash,
-      logs: s.logs ?? [],
-    })),
+    waitForTransactionReceipt: vi.fn(
+      async ({ hash, onReplaced }: { hash: Hex; onReplaced?: (r: unknown) => void }) => {
+        if (s.hangReceipt) return new Promise<never>(() => {});
+        if (s.replacement) {
+          onReplaced?.({ reason: s.replacement.reason, transaction: { hash: s.replacement.hash } });
+          return { status: "success" as const, transactionHash: s.replacement.hash, logs: (s.replacement.logs ?? s.logs ?? []) as never[] };
+        }
+        return { status: "success" as const, transactionHash: hash, logs: s.logs ?? [] };
+      },
+    ),
     getTransactionReceipt: vi.fn(async ({ hash }: { hash: Hex }) => ({ status: "success" as const, transactionHash: hash, logs: s.logs ?? [] })),
   };
   return { client, state: s };
