@@ -1,7 +1,7 @@
 {
   "name": "@tao.com/intents-sdk",
-  "version": "1.0.0",
-  "description": "Browser-first TypeScript SDK for TAO Intents: get a quote and open a cross-chain intent without touching the Quoter API or the smart contract directly.",
+  "version": "1.0.1",
+  "description": "TypeScript SDK for TAO Intents: get a quote and open a cross-chain intent without touching the Quoter API or the smart contract directly.",
   "license": "MIT",
   "repository": {
     "type": "git",
