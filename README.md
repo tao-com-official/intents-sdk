@@ -69,6 +69,18 @@ await intents.execute({
 });
 ```
 
+### Attribution (ERC-8021)
+
+Pass a single code and the SDK appends an [ERC-8021](https://eip.tools/eip/8021) (schema 0) suffix to the `open`
+transaction's calldata, so the order can be attributed to your app. Works on `execute` and `open`.
+
+```ts
+await intents.execute({ ..., partnerId: "my-app" });
+```
+
+The code must be printable ASCII with no spaces or commas (max 255 chars), otherwise `InvalidParamsError`
+is thrown before anything is signed. `buildAttributionSuffix(code)` is exported if you need the raw suffix.
+
 ### Cancelling
 
 Pass an `AbortSignal` to `execute`, `open`, `ensureApproval` or `getQuote`. The SDK stops waiting at any step.
