@@ -14,6 +14,7 @@ import {
   type TransactionReceipt,
 } from "viem";
 import { abortable, throwIfAborted } from "./abort";
+import { buildAttributionSuffix } from "./attribution";
 import { intentsAbi } from "./abi";
 import {
   buildChains,
@@ -75,6 +76,11 @@ export interface OpenParams extends CallOptions {
   wallet: WalletLike;
   /** Refuse to send if the quote's output is below this (base units of the output token). */
   minOutputAmount?: bigint;
+  /**
+   * Attribution code (e.g. your app's builder code). Appended to the `open` transaction's calldata as an
+   * ERC-8021 suffix so the order can be attributed to you. Printable ASCII, no commas or spaces.
+   */
+  partnerId?: string;
 }
 
 export interface OpenResult {
@@ -91,6 +97,8 @@ export interface ExecuteParams extends Omit<QuoteParams, "user">, CallOptions {
   maxQuoteRetries?: number;
   /** Never send an order delivering less than this (base units of the output token). */
   minOutputAmount?: bigint;
+  /** ERC-8021 attribution code for the `open` transaction. See `OpenParams.partnerId`. */
+  partnerId?: string;
   /**
    * Max the output may drop, in basis points, between the first quote (the one your UI showed) and a
    * re-quote taken after an approval or an expiry. Default 100 (1%).
@@ -286,6 +294,7 @@ export class TaoIntents {
   async open(params: OpenParams): Promise<OpenResult> {
     const { quote, onProgress, signal } = params;
     throwIfAborted(signal);
+    const dataSuffix = params.partnerId === undefined ? undefined : buildAttributionSuffix(params.partnerId);
     if (!quote.user || !quote.recipient) throw new IndicativeQuoteError();
     const origin = getChainConfig(this.#chains, quote.originChainId);
     const destination = getChainConfig(this.#chains, quote.destinationChainId);
@@ -343,6 +352,7 @@ export class TaoIntents {
           abi: intentsAbi,
           functionName: "open",
           args: [order],
+          ...(dataSuffix && { dataSuffix }),
         }),
         signal,
       );
@@ -362,6 +372,7 @@ export class TaoIntents {
           abi: intentsAbi,
           functionName: "open",
           args: [order],
+          ...(dataSuffix && { dataSuffix }),
         }),
         signal,
       );
@@ -401,6 +412,7 @@ export class TaoIntents {
       maxQuoteRetries = 2,
       minOutputAmount,
       slippageBps = 100,
+      partnerId,
       signal,
       onProgress,
       ...quoteParams
@@ -408,6 +420,7 @@ export class TaoIntents {
     if (!Number.isInteger(slippageBps) || slippageBps < 0 || slippageBps > 10_000) {
       throw new InvalidParamsError("`slippageBps` must be an integer between 0 and 10000.");
     }
+    if (partnerId !== undefined) buildAttributionSuffix(partnerId); // fail before any approval
     throwIfAborted(signal);
     const origin = getChainConfig(this.#chains, quoteParams.originChainId);
     const amount = parseInputAmount(quoteParams, resolveToken(origin, quoteParams.inputToken ?? "USDC"));
@@ -448,7 +461,7 @@ export class TaoIntents {
       }
       for (let attempt = 0; ; attempt++) {
         try {
-          const result = await this.open({ quote, wallet: wallet.client, signal, onProgress: openProgress });
+          const result = await this.open({ quote, wallet: wallet.client, partnerId, signal, onProgress: openProgress });
           return { ...result, approvalTxHash, quote };
         } catch (error) {
           if (error instanceof QuoteExpiredError && attempt < maxQuoteRetries) {

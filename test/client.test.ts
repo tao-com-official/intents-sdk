@@ -303,6 +303,28 @@ describe("review: fillDeadline", () => {
     expect(origin.client.simulateContract).toHaveBeenCalled();
   });
 
+  it("appends the ERC-8021 suffix to simulate and open when `partnerId` is set", async () => {
+    const { sdk, origin } = setup({ origin: { allowance: 10n ** 12n } });
+    const wallet = mockWalletClient();
+    const quote = await sdk.getQuote({ ...EXEC, user: USER });
+    await sdk.open({ quote, wallet: wallet as never, partnerId: "my-app" });
+    const suffix = "6d792d617070" + "06" + "00" + "80218021802180218021802180218021";
+    expect((call(wallet, 0) as unknown as { dataSuffix: string }).dataSuffix).toBe(`0x${suffix}`);
+    const sim = (origin.client.simulateContract.mock.calls as unknown as Array<[{ dataSuffix: string }]>).at(-1)![0];
+    expect(sim.dataSuffix).toBe(`0x${suffix}`);
+  });
+
+  it("rejects invalid partnerId values and omits the suffix by default", async () => {
+    const { sdk } = setup({ origin: { allowance: 10n ** 12n } });
+    const wallet = mockWalletClient();
+    const quote = await sdk.getQuote({ ...EXEC, user: USER });
+    await expect(sdk.open({ quote, wallet: wallet as never, partnerId: "a,b" })).rejects.toMatchObject({ code: "INVALID_PARAMS" });
+    await expect(sdk.open({ quote, wallet: wallet as never, partnerId: "" })).rejects.toMatchObject({ code: "INVALID_PARAMS" });
+    await expect(sdk.open({ quote, wallet: wallet as never, partnerId: "a".repeat(101) })).rejects.toMatchObject({ code: "INVALID_PARAMS" });
+    await sdk.open({ quote, wallet: wallet as never });
+    expect(call(wallet, 0)).not.toHaveProperty("dataSuffix");
+  });
+
   it("keeps an explicit deadline, but refuses to send one with under 60s left", async () => {
     let t = NOW;
     const { sdk } = setup({ origin: { allowance: 10n ** 12n }, now: () => t });

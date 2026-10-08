@@ -32,5 +32,6 @@ export {
 } from "./config";
 export type { ChainConfig, ChainOverrides, KnownToken, TokenInfo } from "./config";
 
+export { buildAttributionSuffix } from "./attribution";
 export * from "./errors";
 export { intentsAbi } from "./abi";
