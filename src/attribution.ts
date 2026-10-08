@@ -18,8 +18,8 @@ export function buildAttributionSuffix(code: string): Hex {
   if (!/^[\x21-\x7e]+$/.test(code) || code.includes(",")) {
     throw new InvalidParamsError("`partnerId` must be printable ASCII without spaces or commas.");
   }
-  if (code.length > 255) {
-    throw new InvalidParamsError("`partnerId` must be at most 255 characters.");
+  if (code.length > 100) {
+    throw new InvalidParamsError("`partnerId` must be at most 100 characters.");
   }
   const length = code.length.toString(16).padStart(2, "0");
   return `${stringToHex(code)}${length}${SCHEMA_ID}${ERC_8021_MARKER}` as Hex;

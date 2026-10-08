@@ -320,6 +320,7 @@ describe("review: fillDeadline", () => {
     const quote = await sdk.getQuote({ ...EXEC, user: USER });
     await expect(sdk.open({ quote, wallet: wallet as never, partnerId: "a,b" })).rejects.toMatchObject({ code: "INVALID_PARAMS" });
     await expect(sdk.open({ quote, wallet: wallet as never, partnerId: "" })).rejects.toMatchObject({ code: "INVALID_PARAMS" });
+    await expect(sdk.open({ quote, wallet: wallet as never, partnerId: "a".repeat(101) })).rejects.toMatchObject({ code: "INVALID_PARAMS" });
     await sdk.open({ quote, wallet: wallet as never });
     expect(call(wallet, 0)).not.toHaveProperty("dataSuffix");
   });

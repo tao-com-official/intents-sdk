@@ -78,7 +78,7 @@ transaction's calldata, so the order can be attributed to your app. Works on `ex
 await intents.execute({ ..., partnerId: "my-app" });
 ```
 
-The code must be printable ASCII with no spaces or commas (max 255 chars), otherwise `InvalidParamsError`
+The code must be printable ASCII with no spaces or commas (max 100 chars), otherwise `InvalidParamsError`
 is thrown before anything is signed. `buildAttributionSuffix(code)` is exported if you need the raw suffix.
 
 ### Cancelling
