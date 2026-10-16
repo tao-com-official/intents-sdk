@@ -27,8 +27,13 @@ export interface QuoteParams {
    * If omitted the quote is indicative only.
    */
   user?: Address;
-  /** Who receives the output on the destination chain. Defaults to `user`. */
-  recipient?: Address;
+  /**
+   * Who receives the output on the destination chain. Defaults to `user`.
+   * Either an EVM address, or, for native `"TAO"` delivered on Subtensor (964), a Substrate account:
+   * an SS58 address (`"5Grw..."`) or a 32-byte `0x` AccountId32. Substrate recipients are paid by the
+   * solver as a native TAO transfer to that coldkey.
+   */
+  recipient?: Address | (string & {});
   /**
    * Unix time (seconds) by which the intent must be filled: between 60 seconds and 1 day from now.
    * Defaults to now + `fillWindowSeconds` (5 minutes unless configured otherwise). When you leave it
@@ -83,7 +88,15 @@ export interface Quote {
   /** `undefined` when the output token's decimals are unknown (raw address not in the SDK's list). */
   outputAmountFormatted: string | undefined;
   user: Address | undefined;
+  /**
+   * EVM recipient. For a Substrate payout this is still the user's EVM address (what the order's
+   * `recipient` field carries); the coldkey is in `substrateRecipient`.
+   */
   recipient: Address | undefined;
+  /** Substrate AccountId32 (32-byte hex) when the output is paid to a coldkey instead of an EVM address. */
+  substrateRecipient: Hex | undefined;
+  /** `TransferTao` SubtensorData for a Substrate payout (from the Quoter, checked against the coldkey). */
+  subtensorData: Hex | undefined;
   fillDeadline: number;
   /** True when the caller pinned `fillDeadline`. Otherwise `open` refreshes it just before signing. */
   fillDeadlineIsExplicit: boolean;

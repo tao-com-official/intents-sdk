@@ -479,3 +479,52 @@ describe("review: failure after the approval", () => {
     expect(err.approvalTxHash).toBeUndefined();
   });
 });
+
+describe("Substrate recipient", () => {
+  const SS58 = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY";
+  const COLDKEY = "0xd43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d";
+  const base = { originChainId: 1, destinationChainId: 964, outputToken: "TAO", amount: "100", recipient: SS58 };
+
+  it("requests a transfer_tao leg instead of a recipient and opens with the TransferTao data", async () => {
+    const { sdk, fetchMock } = setup({ origin: { allowance: 10n ** 12n } });
+    const wallet = mockWalletClient();
+    const { quote } = await sdk.execute({ wallet: wallet as never, ...base });
+
+    const body = JSON.parse((fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].body as string);
+    expect(body.recipient).toBeUndefined();
+    expect(body.subtensor).toEqual({ side: "destination", operation: "transfer_tao", recipientColdkey: SS58 });
+    expect(quote.substrateRecipient).toBe(COLDKEY);
+    expect(quote.recipient).toBe(USER);
+
+    const [{ orderData }] = (wallet.writeContract.mock.calls as unknown as Array<[{ args: [{ orderData: Hex }] }]>)[0]![0].args;
+    const d = decodeAbiParameters(inputOrderDataParams, orderData)[0];
+    expect(d.outputToken).toBe(OUT_NATIVE);
+    expect(d.recipient.toLowerCase()).toBe(`0x${"0".repeat(24)}${USER.slice(2).toLowerCase()}`);
+    expect(d.subtensorData).toBe(quote.subtensorData);
+    expect(d.subtensorData.length).toBe(2 + 5 * 64);
+  });
+
+  it("encodes a hex coldkey to SS58 for the request", async () => {
+    const { sdk, fetchMock } = setup();
+    await sdk.getQuote({ ...base, recipient: COLDKEY, user: USER });
+    const body = JSON.parse((fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].body as string);
+    expect(body.subtensor.recipientColdkey).toBe(SS58);
+  });
+
+  it("rejects Quoter data that pays someone else", async () => {
+    const other = `0x${"2".repeat(2 * 32)}` as Hex;
+    const { encodeTransferTao } = await import("../src/order-data");
+    const bad = quoterBody();
+    bad.quote.preview.outputs[0] = { ...bad.quote.preview.outputs[0]!, subtensorData: encodeTransferTao(other, 1n) } as never;
+    const { sdk } = setup({ fetchImpl: async () => jsonResponse(bad) });
+    await expect(sdk.getQuote({ ...base, user: USER })).rejects.toMatchObject({ code: "QUOTER_ERROR" });
+  });
+
+  it.each([
+    [{ outputToken: "wTAO" }, "native TAO"],
+    [{ originChainId: 964, destinationChainId: 1, outputToken: "ETH" }, "can't deliver"],
+  ])("rejects unsupported route %#", async (override, fragment) => {
+    const { sdk } = setup();
+    await expect(sdk.getQuote({ ...base, ...override, user: USER })).rejects.toThrow(fragment);
+  });
+});

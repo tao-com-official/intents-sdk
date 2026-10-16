@@ -1,5 +1,6 @@
 import {
   createPublicClient,
+  decodeAbiParameters,
   erc20Abi,
   formatUnits,
   getAddress,
@@ -15,10 +16,11 @@ import {
 } from "viem";
 import { abortable, throwIfAborted } from "./abort";
 import { buildAttributionSuffix } from "./attribution";
-import { intentsAbi } from "./abi";
+import { intentsAbi, SUBTENSOR_OP_TRANSFER_TAO, subtensorDataParams } from "./abi";
 import {
   buildChains,
   DEFAULT_QUOTER_URL,
+  NATIVE_TOKEN_ADDRESS,
   getChainConfig,
   resolveToken,
   toViemChain,
@@ -33,6 +35,7 @@ import {
   InvalidParamsError,
   OrderNotFoundError,
   OutputBelowMinimumError,
+  QuoterError,
   QuoteExpiredError,
   TaoIntentsError,
   TransactionReplacedError,
@@ -41,8 +44,9 @@ import {
   WalletError,
 } from "./errors";
 import { normalizeError } from "./normalize";
-import { buildOrder } from "./order-data";
+import { buildOrder, encodeTransferTao } from "./order-data";
 import { Order, type OrderContext, type OrderRef } from "./order";
+import { encodeSs58, parseSubstrateAddress } from "./substrate";
 import { requestQuote, type QuoterRequest } from "./quoter";
 import type { CallOptions, Quote, QuoteParams, WalletLike } from "./types";
 import { connectWallet, ensureWalletChain, type ConnectedWallet } from "./wallet";
@@ -201,7 +205,21 @@ export class TaoIntents {
     const inputAmount = parseInputAmount(params, inputToken);
 
     const user = params.user ? parseAddress(params.user, "user") : undefined;
-    const recipient = params.recipient ? parseAddress(params.recipient, "recipient") : user;
+    const parsedSubstrate = params.recipient ? parseSubstrateAddress(params.recipient) : undefined;
+    const substrateRecipient = parsedSubstrate?.accountId;
+    const ss58Recipient = parsedSubstrate && (parsedSubstrate.ss58 ?? encodeSs58(parsedSubstrate.accountId));
+    if (substrateRecipient) {
+      if (!destination.substrateRecipients) {
+        throw new UnsupportedRouteError(`${destination.name} can't deliver to a Substrate address. Use an EVM \`recipient\`.`);
+      }
+      if (!outputToken.isNative) {
+        throw new UnsupportedRouteError(
+          "A Substrate `recipient` is only supported for native TAO (`outputToken: \"TAO\"`), not for " + outputToken.symbol + ".",
+        );
+      }
+    }
+    // A Substrate payout still names an EVM address in the order's `recipient`; the coldkey rides in `subtensorData`.
+    const recipient = substrateRecipient || !params.recipient ? user : parseAddress(params.recipient, "recipient");
 
     const now = this.#now();
     const fillDeadline = params.fillDeadline ?? now + this.#fillWindow;
@@ -222,7 +240,16 @@ export class TaoIntents {
       outputTokenAddress: outputToken.address,
       inputAmount: inputAmount.toString(),
       userAddress: user,
-      recipient,
+      // A Substrate payout is requested through a `subtensor` leg instead of `recipient`.
+      ...(substrateRecipient
+        ? {
+            subtensor: {
+              side: "destination" as const,
+              operation: "transfer_tao" as const,
+              recipientColdkey: ss58Recipient!,
+            },
+          }
+        : { recipient }),
       fillDeadline,
     };
 
@@ -236,6 +263,9 @@ export class TaoIntents {
     );
 
     const outputAmount = BigInt(response.quote.preview.outputs[0]!.amount);
+    const subtensorData = substrateRecipient
+      ? resolveTransferTaoData(response.quote.preview.outputs[0]!.subtensorData, substrateRecipient, outputAmount)
+      : undefined;
     return {
       originChainId: origin.id,
       destinationChainId: destination.id,
@@ -248,6 +278,8 @@ export class TaoIntents {
         outputToken.decimals !== undefined ? formatUnits(outputAmount, outputToken.decimals) : undefined,
       user,
       recipient,
+      substrateRecipient,
+      subtensorData,
       fillDeadline,
       fillDeadlineIsExplicit: params.fillDeadline !== undefined,
       validUntil: response.quote.validUntil,
@@ -334,10 +366,11 @@ export class TaoIntents {
       user: quote.user,
       inputToken: origin.usdc,
       inputAmount: quote.inputAmount,
-      outputToken: quote.outputToken.address,
+      outputToken: quote.subtensorData ? NATIVE_TOKEN_ADDRESS : quote.outputToken.address,
       outputAmount: quote.outputAmount,
       destinationChainId: destination.id,
       recipient: quote.recipient,
+      subtensorData: quote.subtensorData,
       maxProtocolFeeBps,
       fillDeadline,
       orderDataType,
@@ -669,6 +702,31 @@ function parseInputAmount(
   }
   if (value <= 0n) throw new InvalidParamsError("The input amount must be greater than zero.");
   return value;
+}
+
+/**
+ * The Quoter returns the `TransferTao` payload for a Substrate payout; the order carries it verbatim. Check
+ * it pays the coldkey the caller asked for before the user signs, and build it locally if the Quoter omitted it.
+ */
+function resolveTransferTaoData(fromQuoter: string | undefined, coldkey: Hex, outputAmount: bigint): Hex {
+  if (!fromQuoter || fromQuoter === "0x") return encodeTransferTao(coldkey, outputAmount);
+  let matches = false;
+  try {
+    const [data] = decodeAbiParameters(subtensorDataParams, fromQuoter as Hex);
+    matches = data.operationType === SUBTENSOR_OP_TRANSFER_TAO && data.recipientColdkey.toLowerCase() === coldkey;
+  } catch {
+    // undecodable: treated as a mismatch below
+  }
+  if (!matches) {
+    throw new QuoterError({
+      status: 200,
+      apiError: "INVALID_RESPONSE",
+      message:
+        "The quote service returned Substrate payout data that doesn't match the requested recipient. Nothing was sent.",
+      retryable: false,
+    });
+  }
+  return fromQuoter as Hex;
 }
 
 function parseAddress(value: string, name: string): Address {
