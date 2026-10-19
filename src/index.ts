@@ -32,6 +32,7 @@ export {
 } from "./config";
 export type { ChainConfig, ChainOverrides, KnownToken, TokenInfo } from "./config";
 
+export { parseSubstrateAddress } from "./substrate";
 export { buildAttributionSuffix } from "./attribution";
 export * from "./errors";
 export { intentsAbi } from "./abi";

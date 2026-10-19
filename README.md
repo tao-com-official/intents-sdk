@@ -151,7 +151,8 @@ const order = await intents.getOrderByTransaction(1, txHash);
 
 ## Supported routes
 
-Mainnet, per the docs. Input is always USDC on the origin chain; the recipient is an EVM address.
+Mainnet, per the docs. Input is always USDC on the origin chain; the recipient is an EVM address, or a Substrate
+account when delivering native TAO on Subtensor (see below).
 
 | Chain (id) | Input | Output tokens |
 | --- | --- | --- |
@@ -161,6 +162,25 @@ Mainnet, per the docs. Input is always USDC on the origin chain; the recipient i
 Tokens can be given by symbol or address. `intents.getChains()` / `intents.getTokens(chainId)` return the built-in
 lists for pickers. Unlisted output addresses are passed through to the Quoter, which decides whether the route
 exists (there is no `outputAmountFormatted` for them, since decimals are unknown).
+
+## Delivering TAO to a Substrate wallet
+
+Native TAO (`outputToken: "TAO"`, destination 964) can be paid straight to a Substrate coldkey. Pass an SS58 address
+(checksum verified) or a 32-byte `0x` AccountId32 as `recipient`:
+
+```ts
+await intents.execute({
+  wallet, originChainId: 1, destinationChainId: 964,
+  outputToken: "TAO", amount: "100",
+  recipient: "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY",
+});
+```
+
+The SDK sends the Quoter a `subtensor` leg (`transfer_tao`, destination) in place of `recipient`.
+The order keeps the user's EVM address as its `recipient` and carries the Quoter's `TransferTao` `subtensorData`, which
+holds the coldkey; the SDK checks that data pays the coldkey you asked for before anything is signed.
+`quote.substrateRecipient` holds the resolved 32-byte account. Any other token or destination throws
+`UnsupportedRouteError`. Substrate payouts are priced with a higher solver margin than EVM ones.
 
 ## Errors
 

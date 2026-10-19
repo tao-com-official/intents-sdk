@@ -31,6 +31,14 @@ export const inputOrderDataParams = parseAbiParameters(
   "(address user, address inputTokenToSwapFrom, uint24 poolFee, uint256 inputAmountToSwapFrom, uint32 swapDeadline, address inputToken, uint256 inputAmount, address outputToken, uint256 outputAmount, uint256 destinationChainId, bytes32 recipient, uint16 maxProtocolFeeBps, bytes subtensorData) order",
 );
 
+/** TaoFullSettler `SubtensorData`: ABI-encoded into `InputOrderData.subtensorData`. */
+export const subtensorDataParams = parseAbiParameters(
+  "(uint8 operationType, uint32 netuid, bytes32 delegatorHotkey, bytes32 recipientColdkey, uint256 amount) data",
+);
+
+/** `SubtensorData.operationType` values. Only `TransferTao` (native TAO to a coldkey) is used by the SDK. */
+export const SUBTENSOR_OP_TRANSFER_TAO = 2;
+
 /** `orderStatus(orderId)` values on the origin contract. */
 export const ORDER_STATUS_DEPOSITED = 1;
 export const ORDER_STATUS_REFUNDED = 3;

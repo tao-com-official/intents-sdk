@@ -11,6 +11,8 @@ export interface QuoterRequest {
   userAddress?: Address;
   recipient?: Address;
   fillDeadline?: number;
+  /** Substrate payout leg, sent instead of `recipient`. `recipientColdkey` is an SS58 address. */
+  subtensor?: { side: "destination"; operation: "transfer_tao"; recipientColdkey: string };
 }
 
 export interface QuoterResponse {
@@ -18,7 +20,7 @@ export interface QuoterResponse {
     validUntil: number;
     preview: {
       inputs: Array<{ asset: string; amount: string; userPaysUsd?: string }>;
-      outputs: Array<{ asset: string; amount: string; userReceivesUsd?: string }>;
+      outputs: Array<{ asset: string; amount: string; userReceivesUsd?: string; subtensorData?: string }>;
     };
   };
   fees?: QuoterFees;

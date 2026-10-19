@@ -38,6 +38,8 @@ export interface ChainConfig {
   intents: Address;
   usdc: Address;
   tokens: KnownToken[];
+  /** Whether native TAO can be delivered to a Substrate (SS58) coldkey on this chain. Subtensor EVM only. */
+  substrateRecipients?: boolean;
 }
 
 export const ETHEREUM = 1;
@@ -68,6 +70,7 @@ export const DEFAULT_CHAINS: Record<number, ChainConfig> = {
     explorerUrl: "https://evm.taostats.io",
     intents: "0x24834012973b6e70997a23C7aAB01481d46CB8E1",
     usdc: USDC_SUBTENSOR,
+    substrateRecipients: true,
     tokens: [
       // On-chain symbol is `USDC.e`; we expose it as USDC like the docs do.
       { symbol: "USDC", name: "USDC.e", address: USDC_SUBTENSOR, decimals: 6, input: true },
