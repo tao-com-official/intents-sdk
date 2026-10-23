@@ -1,8 +1,9 @@
 import { BaseError, ContractFunctionRevertedError, type Hex } from "viem";
 import { describe, expect, it, vi } from "vitest";
 import { TaoIntents, type ProgressEvent } from "../src";
-import { decodeAbiParameters } from "viem";
-import { inputOrderDataParams } from "../src/abi";
+import { decodeAbiParameters, encodeAbiParameters } from "viem";
+import { inputOrderDataParams, subtensorDataParams } from "../src/abi";
+import { encodeSs58, parseSubstrateAddress } from "../src/substrate";
 import { ETH_INTENTS, jsonResponse, mockPublicClient, mockWalletClient, NOW, openLog, quoterBody, USER } from "./helpers";
 
 const OUT_NATIVE = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE";
@@ -526,5 +527,96 @@ describe("Substrate recipient", () => {
   ])("rejects unsupported route %#", async (override, fragment) => {
     const { sdk } = setup();
     await expect(sdk.getQuote({ ...base, ...override, user: USER })).rejects.toThrow(fragment);
+  });
+});
+
+describe("Subnet alpha output", () => {
+  const SS58 = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY";
+  const COLDKEY = "0xd43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d" as Hex;
+  const HOTKEY_SS58 = "5HK5tp6t2S59DywmHRWPBVJeJ86T61KjurYqeooqj8sREpeN";
+  const base = { originChainId: 1, destinationChainId: 964, outputToken: "SN64", amount: "100", recipient: SS58, user: USER };
+  const hotkey = () => parseSubstrateAddress(HOTKEY_SS58)!.accountId;
+
+  function alphaData(over: Partial<{ operationType: number; netuid: number; delegatorHotkey: Hex; recipientColdkey: Hex; amount: bigint }> = {}) {
+    return encodeAbiParameters(subtensorDataParams, [
+      { operationType: 1, netuid: 64, delegatorHotkey: hotkey(), recipientColdkey: COLDKEY, amount: 5_000_000_000n, ...over },
+    ]);
+  }
+  function quoterWith(data: Hex | undefined) {
+    const body = quoterBody();
+    body.quote.preview.outputs[0] = { ...body.quote.preview.outputs[0]!, ...(data && { subtensorData: data }) } as never;
+    return async () => jsonResponse(body);
+  }
+
+  it("requests an alpha_stake leg and opens with the AlphaStake data", async () => {
+    const { sdk, fetchMock } = setup({ origin: { allowance: 10n ** 12n }, fetchImpl: quoterWith(alphaData()) });
+    const wallet = mockWalletClient();
+    const { quote } = await sdk.execute({ wallet: wallet as never, ...(({ user: _u, ...rest }) => rest)(base) });
+
+    const body = JSON.parse((fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].body as string);
+    expect(body.recipient).toBeUndefined();
+    expect(body.outputTokenAddress).toBe(OUT_NATIVE);
+    expect(body.subtensor).toEqual({
+      side: "destination", operation: "alpha_stake", netuid: 64, delegatorHotkey: HOTKEY_SS58, recipientColdkey: SS58,
+    });
+    expect(quote).toMatchObject({
+      outputAmount: 5_000_000_000n,
+      outputAmountFormatted: "5",
+      orderOutputAmount: 320584403022379535n,
+      alpha: { netuid: 64, hotkey: hotkey() },
+      substrateRecipient: COLDKEY,
+      recipient: USER,
+    });
+    expect(quote.outputToken).toMatchObject({ symbol: "SN64", decimals: 9, netuid: 64 });
+
+    const [{ orderData }] = (wallet.writeContract.mock.calls as unknown as Array<[{ args: [{ orderData: Hex }] }]>)[0]![0].args;
+    const d = decodeAbiParameters(inputOrderDataParams, orderData)[0];
+    expect(d.outputToken).toBe(OUT_NATIVE);
+    expect(d.outputAmount).toBe(320584403022379535n); // the TAO the solver stakes, not the alpha
+    expect(d.destinationChainId).toBe(964n);
+    expect(d.subtensorData).toBe(quote.subtensorData);
+  });
+
+  it("uses a custom hotkey", async () => {
+    const other = encodeSs58(`0x${"07".repeat(32)}`);
+    const { sdk, fetchMock } = setup({ fetchImpl: quoterWith(alphaData({ delegatorHotkey: `0x${"07".repeat(32)}` })) });
+    await sdk.getQuote({ ...base, alphaHotkey: other });
+    const body = JSON.parse((fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].body as string);
+    expect(body.subtensor.delegatorHotkey).toBe(other);
+  });
+
+  it("applies minOutputAmount to the alpha amount", async () => {
+    const { sdk } = setup({ fetchImpl: quoterWith(alphaData()) });
+    const quote = await sdk.getQuote(base);
+    await expect(sdk.open({ quote, wallet: mockWalletClient() as never, minOutputAmount: 6_000_000_000n })).rejects.toMatchObject({
+      code: "OUTPUT_BELOW_MINIMUM",
+    });
+  });
+
+  it.each([
+    ["missing", undefined],
+    ["another subnet", alphaData({ netuid: 1 })],
+    ["another owner", alphaData({ recipientColdkey: `0x${"02".repeat(32)}` })],
+    ["another validator", alphaData({ delegatorHotkey: `0x${"02".repeat(32)}` })],
+    ["a TransferTao payload", alphaData({ operationType: 2 })],
+    ["no alpha floor", alphaData({ amount: 0n })],
+  ])("rejects Quoter data that is %s", async (_name, data) => {
+    const { sdk } = setup({ fetchImpl: quoterWith(data) });
+    await expect(sdk.getQuote(base)).rejects.toMatchObject({ code: "QUOTER_ERROR" });
+  });
+
+  it.each([
+    [{ recipient: USER }, "Substrate coldkey"],
+    [{ recipient: undefined }, "Substrate coldkey"],
+    [{ destinationChainId: 1, originChainId: 964 }, "can't deliver"],
+    [{ outputToken: "SN99999" }, "out of range"],
+  ])("rejects invalid input %#", async (override, fragment) => {
+    const { sdk } = setup();
+    await expect(sdk.getQuote({ ...base, ...override })).rejects.toThrow(fragment);
+  });
+
+  it("rejects alphaHotkey for other outputs", async () => {
+    const { sdk } = setup();
+    await expect(sdk.getQuote({ ...base, outputToken: "TAO", alphaHotkey: HOTKEY_SS58 })).rejects.toThrow("alphaHotkey");
   });
 });

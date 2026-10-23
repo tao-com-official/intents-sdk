@@ -157,7 +157,7 @@ account when delivering native TAO on Subtensor (see below).
 | Chain (id) | Input | Output tokens |
 | --- | --- | --- |
 | Ethereum (1) | `USDC` | `USDC`, `ETH` |
-| Subtensor EVM (964) | `USDC` (on-chain `USDC.e`) | `USDC`, `wTAO`, `TAO` |
+| Subtensor EVM (964) | `USDC` (on-chain `USDC.e`) | `USDC`, `wTAO`, `TAO`, `SN<netuid>` (subnet alpha, see below) |
 
 Tokens can be given by symbol or address. `intents.getChains()` / `intents.getTokens(chainId)` return the built-in
 lists for pickers. Unlisted output addresses are passed through to the Quoter, which decides whether the route
@@ -181,6 +181,33 @@ The order keeps the user's EVM address as its `recipient` and carries the Quoter
 holds the coldkey; the SDK checks that data pays the coldkey you asked for before anything is signed.
 `quote.substrateRecipient` holds the resolved 32-byte account. Any other token or destination throws
 `UnsupportedRouteError`. Substrate payouts are priced with a higher solver margin than EVM ones.
+
+## Delivering subnet alpha
+
+Subnet alpha tokens are an output on Subtensor EVM (964). Use `"SN<netuid>"` as `outputToken` (`"SN64"`; `"SN0"` is root
+stake) and a Substrate `recipient`, the coldkey that will own the stake:
+
+```ts
+await intents.execute({
+  wallet, originChainId: 1, destinationChainId: 964,
+  outputToken: "SN64", amount: "100",
+  recipient: "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY",
+  alphaHotkey: "5HK5...", // optional validator to stake to; defaults to the TAO.com validator
+});
+```
+
+Alpha isn't an ERC-20 the solver can transfer: the order's output token is native TAO, and the settler
+(`TaoFullSettler`) stakes that TAO into the subnet for the coldkey (`addStake` + `transferStake`) when the solver fills.
+The SDK sends the Quoter an `alpha_stake` destination leg and the order carries the Quoter's `AlphaStake`
+`subtensorData`. Things that differ from other outputs:
+
+- `quote.outputAmount` is the **minimum alpha** the stake must yield (rao, 9 decimals; the fill reverts below it), and
+  `outputAmountFormatted` is that amount. `quote.orderOutputAmount` is the native TAO (wei) written into the order.
+  `minOutputAmount` and `slippageBps` apply to the alpha amount.
+- `quote.alpha` holds the subnet and validator hotkey; `quote.substrateRecipient` is the stake owner.
+- The SDK checks the Quoter's data stakes to the subnet, validator and coldkey you asked for, and rejects it otherwise
+  (a payload can't be rebuilt locally, since the alpha floor comes from the Quoter).
+- A quote requires `user` (the order's EVM `recipient`), as with any Substrate payout.
 
 ## Errors
 

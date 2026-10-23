@@ -15,6 +15,8 @@ export interface TokenInfo {
   /** `undefined` only for unknown tokens passed by raw address. */
   decimals: number | undefined;
   isNative: boolean;
+  /** Set for subnet alpha tokens (`"SN64"`): the subnet the output is staked into. */
+  netuid?: number;
 }
 
 export interface KnownToken {
@@ -40,6 +42,8 @@ export interface ChainConfig {
   tokens: KnownToken[];
   /** Whether native TAO can be delivered to a Substrate (SS58) coldkey on this chain. Subtensor EVM only. */
   substrateRecipients?: boolean;
+  /** Default validator hotkey (SS58) alpha is staked to when `alphaHotkey` isn't given. Subtensor EVM only. */
+  defaultAlphaHotkey?: string;
 }
 
 export const ETHEREUM = 1;
@@ -71,6 +75,8 @@ export const DEFAULT_CHAINS: Record<number, ChainConfig> = {
     intents: "0x24834012973b6e70997a23C7aAB01481d46CB8E1",
     usdc: USDC_SUBTENSOR,
     substrateRecipients: true,
+    // The official TAO.com validator.
+    defaultAlphaHotkey: "5HK5tp6t2S59DywmHRWPBVJeJ86T61KjurYqeooqj8sREpeN",
     tokens: [
       // On-chain symbol is `USDC.e`; we expose it as USDC like the docs do.
       { symbol: "USDC", name: "USDC.e", address: USDC_SUBTENSOR, decimals: 6, input: true },
@@ -137,6 +143,14 @@ export function getChainConfig(chains: Record<number, ChainConfig>, chainId: num
  * Unknown addresses are accepted (the Quoter decides whether it can serve them) but have no decimals.
  */
 export function resolveToken(chain: ChainConfig, token: string): TokenInfo {
+  const netuid = parseAlphaToken(token);
+  if (netuid !== undefined) {
+    if (!chain.substrateRecipients) {
+      throw new UnsupportedRouteError(`${chain.name} can't deliver subnet alpha tokens. They are only available on Subtensor EVM.`);
+    }
+    // Alpha is staked, not transferred: the order names the native sentinel and the stake rides in `subtensorData`.
+    return { chainId: chain.id, symbol: `SN${netuid}`, name: `Subnet ${netuid} alpha`, address: NATIVE_TOKEN_ADDRESS, decimals: 9, isNative: false, netuid };
+  }
   if (isAddress(token, { strict: false })) {
     const address = getAddress(token);
     const known = chain.tokens.find((t) => t.address.toLowerCase() === address.toLowerCase());
@@ -160,4 +174,16 @@ function toTokenInfo(chainId: number, t: KnownToken): TokenInfo {
     decimals: t.decimals,
     isNative: Boolean(t.isNative),
   };
+}
+
+/** Highest netuid the SDK accepts (the contract takes a uint32; anything above this is treated as malformed). */
+export const MAX_NETUID = 10_000;
+
+/** `"SN64"` (any case) -> `64`; `undefined` when `token` isn't a subnet alpha symbol. SN0 is root stake. */
+export function parseAlphaToken(token: string): number | undefined {
+  const m = /^sn(\d+)$/i.exec(token.trim());
+  if (!m) return undefined;
+  const netuid = Number(m[1]);
+  if (netuid > MAX_NETUID) throw new InvalidParamsError(`Subnet ${netuid} is out of range (0-${MAX_NETUID}).`);
+  return netuid;
 }

@@ -11,8 +11,10 @@ export interface QuoterRequest {
   userAddress?: Address;
   recipient?: Address;
   fillDeadline?: number;
-  /** Substrate payout leg, sent instead of `recipient`. `recipientColdkey` is an SS58 address. */
-  subtensor?: { side: "destination"; operation: "transfer_tao"; recipientColdkey: string };
+  /** Substrate payout leg, sent instead of `recipient`. Coldkey and hotkey are SS58 addresses. */
+  subtensor?:
+    | { side: "destination"; operation: "transfer_tao"; recipientColdkey: string }
+    | { side: "destination"; operation: "alpha_stake"; netuid: number; delegatorHotkey: string; recipientColdkey: string };
 }
 
 export interface QuoterResponse {

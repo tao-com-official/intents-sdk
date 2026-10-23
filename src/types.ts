@@ -17,7 +17,16 @@ export interface QuoteParams {
   destinationChainId: number;
   /** Input token on the origin chain. Defaults to `"USDC"` (the only supported input). */
   inputToken?: TokenInput;
+  /**
+   * Output token. Besides the chain's tokens, `"SN<netuid>"` (e.g. `"SN64"`, `"SN0"` for root stake) delivers
+   * that subnet's alpha, staked for the Substrate `recipient`. Subtensor EVM (964) only.
+   */
   outputToken: TokenInput;
+  /**
+   * Validator hotkey (SS58 or 32-byte `0x`) the alpha is staked to. Only used for `"SN<netuid>"` outputs;
+   * defaults to the TAO.com validator.
+   */
+  alphaHotkey?: string;
   /** Human-readable input amount, e.g. `"100"` or `"12.5"`. */
   amount?: string;
   /** Input amount in base units (e.g. `100_000_000n` = 100 USDC). Use either `amount` or `amountRaw`. */
@@ -32,6 +41,7 @@ export interface QuoteParams {
    * Either an EVM address, or, for native `"TAO"` delivered on Subtensor (964), a Substrate account:
    * an SS58 address (`"5Grw..."`) or a 32-byte `0x` AccountId32. Substrate recipients are paid by the
    * solver as a native TAO transfer to that coldkey.
+   * For subnet alpha (`outputToken: "SN64"`) it is the Substrate coldkey that owns the resulting stake, and is required.
    */
   recipient?: Address | (string & {});
   /**
@@ -83,8 +93,16 @@ export interface Quote {
   /** Input amount in base units. */
   inputAmount: bigint;
   inputAmountFormatted: string;
-  /** Amount the recipient will receive, in base units. Used in the order unchanged. */
+  /**
+   * Amount the recipient will receive, in base units. For subnet alpha this is the minimum alpha (rao, 9 decimals)
+   * the stake is guaranteed to yield; otherwise it is the order's output amount.
+   */
   outputAmount: bigint;
+  /**
+   * The `outputAmount` written into the order. Equals `outputAmount` except for subnet alpha, where the order
+   * carries the native TAO (wei) the solver stakes on the recipient's behalf.
+   */
+  orderOutputAmount: bigint;
   /** `undefined` when the output token's decimals are unknown (raw address not in the SDK's list). */
   outputAmountFormatted: string | undefined;
   user: Address | undefined;
@@ -95,7 +113,9 @@ export interface Quote {
   recipient: Address | undefined;
   /** Substrate AccountId32 (32-byte hex) when the output is paid to a coldkey instead of an EVM address. */
   substrateRecipient: Hex | undefined;
-  /** `TransferTao` SubtensorData for a Substrate payout (from the Quoter, checked against the coldkey). */
+  /** Subnet alpha output: the subnet and validator hotkey (32-byte hex) the stake goes to. `substrateRecipient` owns it. */
+  alpha: { netuid: number; hotkey: Hex } | undefined;
+  /** `TransferTao` / `AlphaStake` SubtensorData (from the Quoter, checked against the requested recipient). */
   subtensorData: Hex | undefined;
   fillDeadline: number;
   /** True when the caller pinned `fillDeadline`. Otherwise `open` refreshes it just before signing. */

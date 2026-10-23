@@ -16,7 +16,7 @@ import {
 } from "viem";
 import { abortable, throwIfAborted } from "./abort";
 import { buildAttributionSuffix } from "./attribution";
-import { intentsAbi, SUBTENSOR_OP_TRANSFER_TAO, subtensorDataParams } from "./abi";
+import { intentsAbi, SUBTENSOR_OP_ALPHA_STAKE, SUBTENSOR_OP_TRANSFER_TAO, subtensorDataParams } from "./abi";
 import {
   buildChains,
   DEFAULT_QUOTER_URL,
@@ -208,17 +208,40 @@ export class TaoIntents {
     const parsedSubstrate = params.recipient ? parseSubstrateAddress(params.recipient) : undefined;
     const substrateRecipient = parsedSubstrate?.accountId;
     const ss58Recipient = parsedSubstrate && (parsedSubstrate.ss58 ?? encodeSs58(parsedSubstrate.accountId));
+    const isAlpha = outputToken.netuid !== undefined;
     if (substrateRecipient) {
       if (!destination.substrateRecipients) {
         throw new UnsupportedRouteError(`${destination.name} can't deliver to a Substrate address. Use an EVM \`recipient\`.`);
       }
-      if (!outputToken.isNative) {
+      if (!outputToken.isNative && !isAlpha) {
         throw new UnsupportedRouteError(
-          "A Substrate `recipient` is only supported for native TAO (`outputToken: \"TAO\"`), not for " + outputToken.symbol + ".",
+          "A Substrate `recipient` is only supported for native TAO (`outputToken: \"TAO\"`) and subnet alpha (`\"SN<netuid>\"`), not for " + outputToken.symbol + ".",
         );
       }
     }
+    if (isAlpha && !substrateRecipient) {
+      throw new InvalidParamsError(
+        `Delivering ${outputToken.symbol} stakes it for a Substrate coldkey: pass an SS58 address or 32-byte \`0x\` AccountId32 as \`recipient\`.`,
+      );
+    }
+    if (params.alphaHotkey !== undefined && !isAlpha) {
+      throw new InvalidParamsError("`alphaHotkey` only applies to subnet alpha outputs (`outputToken: \"SN<netuid>\"`).");
+    }
+    let alpha: { netuid: number; hotkey: Hex; ss58: string } | undefined;
+    if (isAlpha) {
+      const hotkeyInput = params.alphaHotkey ?? destination.defaultAlphaHotkey;
+      const parsedHotkey = hotkeyInput ? parseSubstrateAddress(hotkeyInput) : undefined;
+      if (!parsedHotkey) {
+        throw new InvalidParamsError("`alphaHotkey` must be an SS58 address or a 32-byte `0x` AccountId32.");
+      }
+      alpha = {
+        netuid: outputToken.netuid!,
+        hotkey: parsedHotkey.accountId,
+        ss58: parsedHotkey.ss58 ?? encodeSs58(parsedHotkey.accountId),
+      };
+    }
     // A Substrate payout still names an EVM address in the order's `recipient`; the coldkey rides in `subtensorData`.
+    // That makes the user's EVM address mandatory for alpha, which can only be requested for a signer.
     const recipient = substrateRecipient || !params.recipient ? user : parseAddress(params.recipient, "recipient");
 
     const now = this.#now();
@@ -241,15 +264,25 @@ export class TaoIntents {
       inputAmount: inputAmount.toString(),
       userAddress: user,
       // A Substrate payout is requested through a `subtensor` leg instead of `recipient`.
-      ...(substrateRecipient
+      ...(alpha
         ? {
             subtensor: {
               side: "destination" as const,
-              operation: "transfer_tao" as const,
+              operation: "alpha_stake" as const,
+              netuid: alpha.netuid,
+              delegatorHotkey: alpha.ss58,
               recipientColdkey: ss58Recipient!,
             },
           }
-        : { recipient }),
+        : substrateRecipient
+          ? {
+              subtensor: {
+                side: "destination" as const,
+                operation: "transfer_tao" as const,
+                recipientColdkey: ss58Recipient!,
+              },
+            }
+          : { recipient }),
       fillDeadline,
     };
 
@@ -262,10 +295,18 @@ export class TaoIntents {
       options.signal,
     );
 
-    const outputAmount = BigInt(response.quote.preview.outputs[0]!.amount);
-    const subtensorData = substrateRecipient
-      ? resolveTransferTaoData(response.quote.preview.outputs[0]!.subtensorData, substrateRecipient, outputAmount)
-      : undefined;
+    const orderOutputAmount = BigInt(response.quote.preview.outputs[0]!.amount);
+    const quotedData = response.quote.preview.outputs[0]!.subtensorData;
+    let subtensorData: Hex | undefined;
+    let outputAmount = orderOutputAmount;
+    if (alpha) {
+      // The order carries the TAO the solver stakes; what the recipient gets is the alpha floor in the data.
+      const resolved = resolveAlphaStakeData(quotedData, alpha, substrateRecipient!);
+      subtensorData = resolved.data;
+      outputAmount = resolved.alphaAmount;
+    } else if (substrateRecipient) {
+      subtensorData = resolveTransferTaoData(quotedData, substrateRecipient, orderOutputAmount);
+    }
     return {
       originChainId: origin.id,
       destinationChainId: destination.id,
@@ -274,11 +315,13 @@ export class TaoIntents {
       inputAmount,
       inputAmountFormatted: formatUnits(inputAmount, inputToken.decimals!),
       outputAmount,
+      orderOutputAmount,
       outputAmountFormatted:
         outputToken.decimals !== undefined ? formatUnits(outputAmount, outputToken.decimals) : undefined,
       user,
       recipient,
       substrateRecipient,
+      alpha: alpha && { netuid: alpha.netuid, hotkey: alpha.hotkey },
       subtensorData,
       fillDeadline,
       fillDeadlineIsExplicit: params.fillDeadline !== undefined,
@@ -367,7 +410,7 @@ export class TaoIntents {
       inputToken: origin.usdc,
       inputAmount: quote.inputAmount,
       outputToken: quote.subtensorData ? NATIVE_TOKEN_ADDRESS : quote.outputToken.address,
-      outputAmount: quote.outputAmount,
+      outputAmount: quote.orderOutputAmount,
       destinationChainId: destination.id,
       recipient: quote.recipient,
       subtensorData: quote.subtensorData,
@@ -727,6 +770,45 @@ function resolveTransferTaoData(fromQuoter: string | undefined, coldkey: Hex, ou
     });
   }
   return fromQuoter as Hex;
+}
+
+/**
+ * The Quoter returns the `AlphaStake` payload for a subnet alpha output, with `amount` = the minimum alpha (rao)
+ * the stake must yield (the settler reverts the fill below it). Unlike `TransferTao` it can't be rebuilt locally,
+ * so a missing payload is an error; one that stakes to a different subnet, validator or owner is rejected.
+ */
+function resolveAlphaStakeData(
+  fromQuoter: string | undefined,
+  alpha: { netuid: number; hotkey: Hex },
+  coldkey: Hex,
+): { data: Hex; alphaAmount: bigint } {
+  let alphaAmount: bigint | undefined;
+  try {
+    if (fromQuoter && fromQuoter !== "0x") {
+      const [data] = decodeAbiParameters(subtensorDataParams, fromQuoter as Hex);
+      if (
+        data.operationType === SUBTENSOR_OP_ALPHA_STAKE &&
+        data.netuid === alpha.netuid &&
+        data.delegatorHotkey.toLowerCase() === alpha.hotkey &&
+        data.recipientColdkey.toLowerCase() === coldkey &&
+        data.amount > 0n
+      ) {
+        alphaAmount = data.amount;
+      }
+    }
+  } catch {
+    // undecodable: treated as a mismatch below
+  }
+  if (alphaAmount === undefined) {
+    throw new QuoterError({
+      status: 200,
+      apiError: "INVALID_RESPONSE",
+      message:
+        "The quote service returned alpha stake data that doesn't match the requested subnet, validator and recipient. Nothing was sent.",
+      retryable: false,
+    });
+  }
+  return { data: fromQuoter as Hex, alphaAmount };
 }
 
 function parseAddress(value: string, name: string): Address {
