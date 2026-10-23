@@ -36,7 +36,8 @@ export const subtensorDataParams = parseAbiParameters(
   "(uint8 operationType, uint32 netuid, bytes32 delegatorHotkey, bytes32 recipientColdkey, uint256 amount) data",
 );
 
-/** `SubtensorData.operationType` values. Only `TransferTao` (native TAO to a coldkey) is used by the SDK. */
+/** `SubtensorData.operationType` values the SDK uses: `AlphaStake` (stake into a subnet) and `TransferTao` (native TAO to a coldkey). */
+export const SUBTENSOR_OP_ALPHA_STAKE = 1;
 export const SUBTENSOR_OP_TRANSFER_TAO = 2;
 
 /** `orderStatus(orderId)` values on the origin contract. */
