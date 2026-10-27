@@ -6,6 +6,11 @@ export type {
   ExecuteParams,
   ExecuteResult,
   EnsureApprovalParams,
+  SubstrateOpenParams,
+  SubstrateOpenResult,
+  SubstrateExecuteParams,
+  SubstrateExecuteResult,
+  RecoverRefundParams,
 } from "./client";
 
 export { Order } from "./order";
@@ -21,7 +26,9 @@ export type {
   WalletLike,
   Eip1193Provider,
   TokenInput,
+  InputKind,
 } from "./types";
+export type { QuoterRoute } from "./swap";
 
 export {
   DEFAULT_CHAINS,
@@ -30,9 +37,20 @@ export {
   ETHEREUM,
   SUBTENSOR_EVM,
 } from "./config";
-export type { ChainConfig, ChainOverrides, KnownToken, TokenInfo } from "./config";
+export type { ChainConfig, ChainOverrides, KnownToken, TokenInfo, UniswapConfig } from "./config";
 
 export { parseSubstrateAddress } from "./substrate";
+export { substrateEvmAddress } from "./evm-call";
+export { polkadotSigner } from "./substrate-signer";
+export type {
+  SubstrateSigner,
+  SubstrateCall,
+  SubstrateEvent,
+  SubstrateBatchResult,
+  SubstrateSignOptions,
+  PolkadotApiLike,
+  PolkadotSignerOptions,
+} from "./substrate-signer";
 export { buildAttributionSuffix } from "./attribution";
 export * from "./errors";
 export { intentsAbi } from "./abi";

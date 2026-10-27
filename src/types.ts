@@ -1,5 +1,16 @@
 import type { Address, Hash, Hex, WalletClient } from "viem";
 import type { TokenInfo } from "./config";
+import type { QuoterRoute } from "./swap";
+
+/**
+ * How the input reaches the escrow, which decides what `open` has to do:
+ * - `usdc`: pulled directly (ERC-20 approval).
+ * - `native`: ETH / TAO sent as `msg.value`, swapped to USDC by the settler (no approval).
+ * - `erc20`: any other token, approved to the settler and swapped to USDC.
+ * - `alpha`: subnet alpha staked by the user's EVM address; the settler unstakes it (staking-precompile
+ *   allowance), swaps the TAO to USDC.
+ */
+export type InputKind = "usdc" | "native" | "erc20" | "alpha";
 
 /** Any EIP-1193 provider, e.g. `window.ethereum`, WalletConnect, Coinbase Wallet, or a wagmi connector's provider. */
 export interface Eip1193Provider {
@@ -15,7 +26,11 @@ export type TokenInput = string;
 export interface QuoteParams {
   originChainId: number;
   destinationChainId: number;
-  /** Input token on the origin chain. Defaults to `"USDC"` (the only supported input). */
+  /**
+   * Input token on the origin chain. Defaults to `"USDC"`. Besides USDC, the chain's native token (`"ETH"` /
+   * `"TAO"`) and `"wTAO"` are supported. On Subtensor EVM (964) `"SN<netuid>"` (e.g. `"SN64"`; `"SN0"` is root stake)
+   * pays with subnet alpha staked to the connected EVM address (pass `alphaHotkey` and `user`; `amount` is in alpha, 9 decimals).
+   */
   inputToken?: TokenInput;
   /**
    * Output token. Besides the chain's tokens, `"SN<netuid>"` (e.g. `"SN64"`, `"SN0"` for root stake) delivers
@@ -23,19 +38,29 @@ export interface QuoteParams {
    */
   outputToken: TokenInput;
   /**
-   * Validator hotkey (SS58 or 32-byte `0x`) the alpha is staked to. Only used for `"SN<netuid>"` outputs;
-   * defaults to the TAO.com validator.
+   * Validator hotkey (SS58 or 32-byte `0x`) of a subnet alpha leg.
+   * - `"SN<netuid>"` output: the validator the alpha is staked to. Defaults to the TAO.com validator.
+   * - `"SN<netuid>"` input: the hotkey the user's alpha is currently staked to. Required: the settler can
+   *   only unstake from the hotkey that holds the stake.
    */
   alphaHotkey?: string;
   /** Human-readable input amount, e.g. `"100"` or `"12.5"`. */
   amount?: string;
-  /** Input amount in base units (e.g. `100_000_000n` = 100 USDC). Use either `amount` or `amountRaw`. */
+  /** Input amount in base units of the input token (e.g. `100_000_000n` = 100 USDC). Use either `amount` or `amountRaw`. */
   amountRaw?: bigint;
   /**
    * The address that will call `open`. Required to open an intent from the quote.
    * If omitted the quote is indicative only.
    */
   user?: Address;
+  /**
+   * Open the intent from a Substrate account instead of an EVM wallet (Subtensor EVM origin, paying native TAO or
+   * subnet alpha): an SS58 address or 32-byte `0x` AccountId32. The order's `user` is then the EVM address that
+   * account acts as (`substrateEvmAddress`), so don't pass `user`; do pass `recipient`, which has no default here.
+   * Open the quote with `open({ quote, substrate })`. For a subnet alpha input, an `amount` that is the whole
+   * stake is trimmed by 2 rao (see `Quote.inputAmount`).
+   */
+  substrateAccount?: string;
   /**
    * Who receives the output on the destination chain. Defaults to `user`.
    * Either an EVM address, or, for native `"TAO"` delivered on Subtensor (964), a Substrate account:
@@ -88,9 +113,14 @@ export interface QuoterFees {
 export interface Quote {
   originChainId: number;
   destinationChainId: number;
-  inputToken: TokenInfo;
+  inputToken: TokenInfo & { decimals: number };
   outputToken: TokenInfo;
-  /** Input amount in base units. */
+  /** How the input is paid; see `InputKind`. */
+  inputKind: InputKind;
+  /**
+   * Input amount in base units of the input token (alpha: rao). For a Substrate account's alpha input that is
+   * the whole stake, 2 rao less than asked for: the stake move needs that much headroom to clear.
+   */
   inputAmount: bigint;
   inputAmountFormatted: string;
   /**
@@ -106,6 +136,8 @@ export interface Quote {
   /** `undefined` when the output token's decimals are unknown (raw address not in the SDK's list). */
   outputAmountFormatted: string | undefined;
   user: Address | undefined;
+  /** Set when the quote is for a Substrate account (`QuoteParams.substrateAccount`): its 32-byte AccountId. */
+  substrateAccount: Hex | undefined;
   /**
    * EVM recipient. For a Substrate payout this is still the user's EVM address (what the order's
    * `recipient` field carries); the coldkey is in `substrateRecipient`.
@@ -117,6 +149,16 @@ export interface Quote {
   alpha: { netuid: number; hotkey: Hex } | undefined;
   /** `TransferTao` / `AlphaStake` SubtensorData (from the Quoter, checked against the requested recipient). */
   subtensorData: Hex | undefined;
+  /**
+   * Alpha input only: the stake the settler unstakes. `coldkey` is the Substrate account the user's EVM
+   * address maps to (where the alpha must already be staked); `subtensorData` goes into the order.
+   */
+  alphaInput: { netuid: number; hotkey: Hex; coldkey: Hex; amount: bigint; subtensorData: Hex } | undefined;
+  /**
+   * The Uniswap hop the Quoter priced for a non-USDC input. `open` sizes the order's USDC floor from it
+   * and falls back to asking the pool itself when the Quoter sent none.
+   */
+  swapRoute: QuoterRoute | undefined;
   fillDeadline: number;
   /** True when the caller pinned `fillDeadline`. Otherwise `open` refreshes it just before signing. */
   fillDeadlineIsExplicit: boolean;
@@ -137,15 +179,20 @@ export interface Quote {
 export type ProgressEvent =
   | { step: "switching-chain"; chainId: number }
   | { step: "checking-balance" }
-  | { step: "approval-required"; amount: bigint }
+  | { step: "approval-required"; amount: bigint; token?: TokenInfo; kind?: "erc20" | "alpha-stake" }
   | { step: "approval-submitted"; txHash: Hash }
   | { step: "approval-confirmed"; txHash: Hash }
+  | { step: "swap-quoted"; minUsdc: bigint; quotedUsdc: bigint; poolFee: number; source: "quoter" | "onchain" }
   | { step: "quoting" }
   | { step: "quoted"; quote: Quote }
   | { step: "quote-refreshing"; reason: "expired" | "approval" }
   | { step: "awaiting-signature" }
   | { step: "submitted"; txHash: Hash }
-  | { step: "confirmed"; txHash: Hash; orderId: Hex };
+  | { step: "confirmed"; txHash: Hash; orderId: Hex }
+  /** Substrate account path: the batch is signed and about to be broadcast. */
+  | { step: "substrate-submitted"; extrinsicHash: Hex }
+  /** Substrate account path: the batch is in a block and the intent is open. */
+  | { step: "substrate-confirmed"; extrinsicHash: Hex; blockHash: Hex; orderId: Hex };
 
 export type ProgressCallback = (event: ProgressEvent) => void;
 

@@ -1,5 +1,6 @@
 import type { Address } from "viem";
 import { AbortedError, QuoterError, type QuoterFailure } from "./errors";
+import type { QuoterRoute } from "./swap";
 import type { QuoterFees } from "./types";
 
 export interface QuoterRequest {
@@ -14,18 +15,22 @@ export interface QuoterRequest {
   /** Substrate payout leg, sent instead of `recipient`. Coldkey and hotkey are SS58 addresses. */
   subtensor?:
     | { side: "destination"; operation: "transfer_tao"; recipientColdkey: string }
-    | { side: "destination"; operation: "alpha_stake"; netuid: number; delegatorHotkey: string; recipientColdkey: string };
+    | { side: "destination"; operation: "alpha_stake"; netuid: number; delegatorHotkey: string; recipientColdkey: string }
+    /** Alpha input: the stake the settler unstakes. `amount` is the alpha in rao; the coldkey owns it. */
+    | { side: "source"; operation: "alpha_stake"; netuid: number; delegatorHotkey: string; recipientColdkey: string; amount: string };
 }
 
 export interface QuoterResponse {
   quote: {
     validUntil: number;
     preview: {
-      inputs: Array<{ asset: string; amount: string; userPaysUsd?: string }>;
+      inputs: Array<{ asset: string; amount: string; userPaysUsd?: string; subtensorData?: string }>;
       outputs: Array<{ asset: string; amount: string; userReceivesUsd?: string; subtensorData?: string }>;
     };
   };
   fees?: QuoterFees;
+  /** Uniswap hop the winning solver priced for a non-USDC input. Absent for USDC or older backends. */
+  route?: QuoterRoute;
 }
 
 export interface QuoterClientOptions {

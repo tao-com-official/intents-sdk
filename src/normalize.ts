@@ -3,6 +3,7 @@ import {
   ContractRevertError,
   InsufficientGasError,
   REVERT_MESSAGES,
+  REVERT_REASONS,
   TaoIntentsError,
   UserRejectedError,
   WalletError,
@@ -17,8 +18,9 @@ export function normalizeError(error: unknown, action: string): TaoIntentsError 
   if (error instanceof BaseError) {
     const revert = error.walk((e) => e instanceof ContractFunctionRevertedError);
     if (revert instanceof ContractFunctionRevertedError) {
-      const name = revert.data?.errorName;
-      const known = name ? REVERT_MESSAGES[name] : undefined;
+      // A plain `Error(string)` (the Uniswap router's, for one) reports its text as `reason`, not a name.
+      const name = revert.data?.errorName === "Error" ? undefined : revert.data?.errorName;
+      const known = name ? REVERT_MESSAGES[name] : revert.reason ? REVERT_REASONS[revert.reason] : undefined;
       const message =
         known ??
         (name

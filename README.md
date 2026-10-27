@@ -36,10 +36,10 @@ console.log(result.state);
 
 `execute` does everything in the right order:
 
-1. connects the wallet, switches (or adds) the chain, and checks the USDC balance;
+1. connects the wallet, switches (or adds) the chain, and checks the balance of what is being paid (USDC by default);
 2. requests a **first quote before any approval**, so a failed quote (rate limit, no liquidity, bad route) never costs
    the user an approval transaction;
-3. approves exactly the input amount if needed, then **reuses that quote**: an approval mines in seconds and a quote
+3. approves exactly the input amount if needed (nothing for a native token), then **reuses that quote**: an approval mines in seconds and a quote
    lasts ~60s. Only if less than ~20s of it is left does it take a fresh one. With enough allowance there is just
    one quote and no approval;
 4. simulates `open`, sends it, and reads the order ID from the receipt of the transaction that was actually mined.
@@ -151,17 +151,131 @@ const order = await intents.getOrderByTransaction(1, txHash);
 
 ## Supported routes
 
-Mainnet, per the docs. Input is always USDC on the origin chain; the recipient is an EVM address, or a Substrate
-account when delivering native TAO on Subtensor (see below).
+Mainnet, per the docs. The recipient is an EVM address, or a Substrate account when delivering native TAO on
+Subtensor (see below).
 
 | Chain (id) | Input | Output tokens |
 | --- | --- | --- |
-| Ethereum (1) | `USDC` | `USDC`, `ETH` |
-| Subtensor EVM (964) | `USDC` (on-chain `USDC.e`) | `USDC`, `wTAO`, `TAO`, `SN<netuid>` (subnet alpha, see below) |
+| Ethereum (1) | `USDC`, `ETH` | `USDC`, `ETH` |
+| Subtensor EVM (964) | `USDC` (on-chain `USDC.e`), `TAO`, `wTAO`, `SN<netuid>` (subnet alpha, see below) | `USDC`, `wTAO`, `TAO`, `SN<netuid>` (subnet alpha, see below) |
 
 Tokens can be given by symbol or address. `intents.getChains()` / `intents.getTokens(chainId)` return the built-in
 lists for pickers. Unlisted output addresses are passed through to the Quoter, which decides whether the route
 exists (there is no `outputAmountFormatted` for them, since decimals are unknown).
+
+## Paying with something other than USDC
+
+`inputToken` defaults to `"USDC"`. Any other input is swapped into USDC by the settler inside `open()`, through
+Uniswap V3, before the USDC is escrowed. The order's USDC amount becomes the **minimum the swap must return**, so the
+swap can't fill at a worse price than you allowed.
+
+```ts
+// 0.5 ETH on Ethereum in, native TAO out
+await intents.execute({ wallet, originChainId: 1, destinationChainId: 964, outputToken: "TAO",
+  inputToken: "ETH", amount: "0.5", swapSlippageBps: 50 });
+```
+
+| Input | What the user signs |
+| --- | --- |
+| `USDC` | ERC-20 approval (if needed), then `open`. |
+| Native (`ETH`, `TAO`) | Only `open`, with the amount as the transaction value. No approval. |
+| `wTAO` | ERC-20 approval of that token, then `open`. |
+| Subnet alpha (`SN<netuid>`) | A staking-precompile approval, then `open` (see below). |
+
+How the USDC floor is set: the Quoter reports the Uniswap hop it priced (`quote.swapRoute`: fee tier and expected USDC).
+`open` uses that, minus `swapSlippageBps` (default 100 = 1%). If the Quoter sent none, the SDK asks Uniswap's QuoterV2
+itself on every fee tier and keeps the best output. A floor far below what the quote promised throws
+`SwapQuoteError` rather than signing an order nobody can fill. The `swap-quoted` progress event reports the result.
+
+Things to know:
+
+- The supported inputs are the ones in the table above: they are the tokens the solver serves on mainnet.
+- The swap is **single-hop** (a native input is swapped as WETH / wTAO against USDC). Nothing is routed through
+  intermediate pools, so a pair without a direct USDC pool fails with `SwapQuoteError` ("No Uniswap V3 liquidity"),
+  before any approval is paid.
+- Pricing through QuoterV2 (when the Quoter sent no route) asks every fee tier and gives each a few seconds, so a
+  drained pool that is slow to quote is dropped instead of stalling the rest. Public RPCs rate-limit these calls; set
+  `rpcUrls` to your own node in production.
+- A native input needs the amount **plus gas**. The SDK checks the balance covers the amount; gas shortfalls surface as
+  `InsufficientGasError` from the simulation.
+- The protocol fee is taken from the swapped USDC, and the quoted output already accounts for it.
+- `quote.inputAmount` is in the input token's units; the order's USDC escrow is derived at `open` time, so a slow user
+  gets a floor priced right before they sign (and the swap is priced again, not reused from `getQuote`).
+
+### Paying with subnet alpha
+
+On Subtensor EVM (964), `inputToken: "SN<netuid>"` (`"SN0"` is root stake) pays with alpha. The settler unstakes it for
+the user (`transferStakeFrom` + `removeStake`), swaps the TAO it gets into USDC, and escrows that.
+
+```ts
+await intents.execute({
+  wallet, originChainId: 964, destinationChainId: 1, outputToken: "USDC",
+  inputToken: "SN64", amount: "1.5",               // alpha, 9 decimals
+  alphaHotkey: "5HK5...",                          // the hotkey the alpha is staked to (required)
+});
+```
+
+- The alpha must already be staked by the **EVM address that signs**, i.e. the Substrate account that address maps to
+  (`HashedAddressMapping`, read from the chain's address-mapping precompile). Alpha held by a regular Substrate wallet
+  has to be moved there first with a `transfer_stake` extrinsic, or skip that step by [paying from a Substrate account
+  directly](#paying-from-a-substrate-account).
+- `alphaHotkey` must be the hotkey that holds the stake: the settler can only unstake from it. A missing or insufficient
+  stake throws `InsufficientBalanceError` before anything is approved.
+- The approval is the staking precompile's `approve(settler, netuid, amount)`, for exactly the alpha amount.
+- The minimum TAO the unstake must produce is computed from the chain's own `simSwapAlphaForTao` simulation (root stake is
+  1:1), less `swapSlippageBps`. The settler reverts the whole `open` if the unstake yields less.
+- Alpha can't be both the input and the output of one intent, and the destination can't be Subtensor EVM itself (the
+  Quoter rejects same-chain quotes).
+
+## Paying from a Substrate account
+
+A Substrate coldkey can open an intent **with one signature and no EVM wallet or gas**, paying native TAO or subnet
+alpha. The SDK builds one `utility.batchAll` that the coldkey signs; inside it the coldkey drives the EVM through
+`evm.call`, acting as the EVM address made of the first 20 bytes of its public key (`substrateEvmAddress(account)`):
+
+- native TAO: fund that address with the amount plus gas, call `open`;
+- alpha: `transfer_stake` to the address's mirror account, fund gas, approve the settler on the staking precompile
+  (skipped if already allowed), call `open`;
+- in both, sweep the unused gas back to the coldkey. The sweep is also what makes the batch atomic for alpha: if `open`
+  reverts it burns the gas the sweep needs and the whole batch (stake move included) rolls back.
+
+The SDK has no Substrate dependency: you give it a `SubstrateSigner`. `polkadotSigner` adapts a polkadot-js `ApiPromise`
+(connected over WebSocket) and an extension signer or keyring pair.
+
+```ts
+import { TaoIntents, polkadotSigner } from "@tao.com/intents-sdk";
+
+const substrate = polkadotSigner({ api, account: address, signer: injector.signer });
+const { order, extrinsicHash } = await intents.execute({
+  substrate,                                     // instead of `wallet`
+  originChainId: 964, destinationChainId: 1,
+  inputToken: "TAO", outputToken: "USDC", amount: "1",   // or inputToken: "SN64" + alphaHotkey
+  recipient: "0xYourEvmAddress",                 // required: the account's own EVM address has no key
+});
+```
+
+`getQuote({ substrateAccount: address, recipient, ... })` followed by `open({ quote, substrate })` works like the EVM flow.
+Any other `SubstrateSigner` only needs `signAndSendBatch(calls)` (a `utility.batchAll` of `{ section, method, args }`) and,
+optionally, `spendableAfterFee(calls)` so the SDK can refuse before asking for a signature.
+
+- **Only native TAO and alpha**, on Subtensor EVM. USDC / wTAO are paid from an EVM wallet as before; nothing about that
+  path changed.
+- **`recipient` is required.** The order's `user` is the account's EVM address, which has no private key.
+- **Refunds land at that address.** An order nobody fills is refunded in USDC to `substrateEvmAddress(account)`.
+  `recoverRefund({ substrate, originChainId: 964, to })` moves it to an address you control, with one signature. Gas left
+  at that address by an earlier batch is reused by the next one.
+- **Alpha: amounts that are the whole stake lose 2 rao** (`quote.inputAmount` shows it): the stake move needs that much
+  headroom to clear. The alpha must sit at the coldkey, on `alphaHotkey`.
+- **Native TAO amounts are limited to 9 decimals** (whole rao).
+- There is no pre-flight simulation of `open` (the account's EVM address holds nothing until the batch funds it, and the
+  public node ignores balance overrides). A reverted `open` is caught from the batch's events and throws
+  `EvmCallFailedError`; for a native input the TAO then stays at that address, available to the next batch.
+- The result has no EVM transaction: `extrinsicHash` / `blockHash` replace `txHash`, and `order.openTxHash` is unset.
+  Progress events are `substrate-submitted` and `substrate-confirmed`. The extrinsic is mortal for ~51 minutes, since
+  a wallet that can't decode the batch makes users read before signing; the SDK vetoes a signature that leaves the fill
+  deadline under 60s.
+- Fees: the batch's extrinsic fee scales with its gas limits (measured live ~0.0067 TAO native, ~0.027 TAO with an
+  alpha approval) and is paid by the coldkey on top of the gas it funds.
 
 ## Delivering TAO to a Substrate wallet
 
@@ -216,18 +330,21 @@ Every failure is a `TaoIntentsError` with a stable `code`; nothing is opened on-
 | Class | `code` | Typical handling |
 | --- | --- | --- |
 | `InvalidParamsError` | `INVALID_PARAMS` | Fix the input (bad address, amount, deadline). |
-| `UnsupportedRouteError` | `UNSUPPORTED_ROUTE` | Unknown chain/token, same-chain, non-USDC input. |
+| `UnsupportedRouteError` | `UNSUPPORTED_ROUTE` | Unknown chain/token, same-chain, or a swap input on a chain with no Uniswap deployment. |
+| `SwapQuoteError` | `SWAP_QUOTE_FAILED` | A non-USDC input can't be priced into USDC (no pool liquidity, RPC failure, absurd floor). Nothing was sent or approved. |
 | `QuoterError` | `QUOTER_ERROR` | Has `status`, `apiError`, `failures`, `retryable`, `paused`. |
 | `QuoterError` | `QUOTER_FORBIDDEN` | HTTP 403: your origin/network is blocked. Not retryable; `blocked` is `true`. |
 | `QuoterError` | `QUOTER_UNREACHABLE` | No response at all. In a browser this is either being offline or a CORS / allow-list block (indistinguishable), so the message says both. `blocked` is `true`. |
 | `QuoteExpiredError` | `QUOTE_EXPIRED` | Request a new quote. |
 | `IndicativeQuoteError` | `INDICATIVE_QUOTE` | Re-quote with `user`. |
-| `InsufficientBalanceError` | `INSUFFICIENT_BALANCE` | Has `required` / `available`. |
+| `InsufficientBalanceError` | `INSUFFICIENT_BALANCE` | Has `required` / `available`, for the token being paid (or the alpha stake). |
 | `InsufficientGasError` | `INSUFFICIENT_GAS` | User needs native token for gas. |
 | `UserRejectedError` | `USER_REJECTED` | User dismissed the wallet prompt. |
 | `ContractRevertError` | `CONTRACT_REVERT` | Has `errorName` (e.g. `FullSettler__ProtocolFeeExceedsMax`) and a readable message. |
 | `TransactionRevertedError` | `TRANSACTION_REVERTED` | Mined but reverted; has `txHash`. |
 | `WalletError` | `WALLET_ERROR` | Wallet/network problem. |
+| `SubstrateError` | `SUBSTRATE_ERROR` | Signing or submitting the Substrate extrinsic failed; `dispatchError` / `extrinsicHash` when known. |
+| `EvmCallFailedError` | `EVM_CALL_FAILED` | The Substrate batch ran but `open` didn't (reverted inside the EVM, or no `Open` event). Nothing was opened. |
 | `OrderNotFoundError` | `ORDER_NOT_FOUND` | Wrong chain, or hash isn't an intent. |
 | `OutputBelowMinimumError` | `OUTPUT_BELOW_MINIMUM` | Your `minOutputAmount` / `slippageBps` guard. Nothing was sent. |
 | `TransactionReplacedError` | `TRANSACTION_REPLACED` | The user cancelled or replaced the transaction in the wallet; no intent was opened. |
