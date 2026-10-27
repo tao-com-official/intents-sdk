@@ -9,10 +9,13 @@ export type TaoIntentsErrorCode =
   | "INDICATIVE_QUOTE"
   | "INSUFFICIENT_BALANCE"
   | "INSUFFICIENT_GAS"
+  | "SWAP_QUOTE_FAILED"
   | "USER_REJECTED"
   | "CONTRACT_REVERT"
   | "TRANSACTION_REVERTED"
   | "WALLET_ERROR"
+  | "SUBSTRATE_ERROR"
+  | "EVM_CALL_FAILED"
   | "ORDER_NOT_FOUND"
   | "OUTPUT_BELOW_MINIMUM"
   | "TRANSACTION_REPLACED"
@@ -126,6 +129,16 @@ export class InsufficientBalanceError extends TaoIntentsError {
   }
 }
 
+/**
+ * A non-USDC input can't be priced into USDC: the Uniswap pool has no liquidity, the RPC failed, or the
+ * resulting floor is far below what the quote promised. Nothing was sent.
+ */
+export class SwapQuoteError extends TaoIntentsError {
+  constructor(message: string, cause?: unknown) {
+    super("SWAP_QUOTE_FAILED", message, { cause });
+  }
+}
+
 export class InsufficientGasError extends TaoIntentsError {
   constructor(cause?: unknown) {
     super("INSUFFICIENT_GAS", "The wallet doesn't have enough native token to pay for gas.", { cause });
@@ -160,6 +173,37 @@ export class TransactionRevertedError extends TaoIntentsError {
 export class WalletError extends TaoIntentsError {
   constructor(message: string, cause?: unknown) {
     super("WALLET_ERROR", message, { cause });
+  }
+}
+
+/**
+ * Signing or submitting the Substrate extrinsic failed, or it was included but failed on-chain.
+ * `dispatchError` is the runtime's `pallet.Error` string when it came from the chain.
+ */
+export class SubstrateError extends TaoIntentsError {
+  readonly dispatchError: string | undefined;
+  /** Set once the extrinsic was signed: it may still land if it was already broadcast. */
+  readonly extrinsicHash: `0x${string}` | undefined;
+  constructor(message: string, options: { cause?: unknown; dispatchError?: string; extrinsicHash?: `0x${string}` } = {}) {
+    super("SUBSTRATE_ERROR", message, { cause: options.cause });
+    this.dispatchError = options.dispatchError;
+    this.extrinsicHash = options.extrinsicHash;
+  }
+}
+
+/**
+ * The Substrate batch ran but the intent was not opened: the EVM call inside it reverted, or the batch's
+ * closing sweep (which only clears when `open` succeeded) failed. Nothing was escrowed; the batch is atomic
+ * except for a native input, whose reverted call leaves the TAO at the account's EVM address.
+ */
+export class EvmCallFailedError extends TaoIntentsError {
+  readonly extrinsicHash: `0x${string}` | undefined;
+  /** The raw `evm.ExecutedFailed` event data, when that is how the failure showed. */
+  readonly details: unknown;
+  constructor(message: string, extrinsicHash?: `0x${string}`, details?: unknown) {
+    super("EVM_CALL_FAILED", message);
+    this.extrinsicHash = extrinsicHash;
+    this.details = details;
   }
 }
 
@@ -237,6 +281,20 @@ export const REVERT_MESSAGES: Record<string, string> = {
   FullSettler__ProtocolFeeExceedsMax:
     "The protocol fee changed since the quote was requested. Request a new quote.",
   FullSettler__InvalidCall: "The order was rejected by the contract (invalid swap fields or native value sent).",
+  FullSettler__SwapRouterNotSet: "Swapping this token isn't enabled on this chain yet. Pay with USDC instead.",
+  FullSettler__SwapAmountTooLow:
+    "The swap into USDC returned less than the minimum. The price moved; request a new quote, or raise the swap slippage.",
+  SubtensorStakingLib__LowerThanExpectedTaoAfterUnstake:
+    "Unstaking the alpha returned less TAO than the minimum. The price moved; request a new quote, or raise the swap slippage.",
+  SubtensorStakingLib__InvalidAmount: "The stake amount was rejected by the Subtensor staking precompile.",
+};
+
+/** Explanations for revert strings from contracts the settler calls (matched on the exact text). */
+export const REVERT_REASONS: Record<string, string> = {
+  // Uniswap SwapRouter02, when the swap into USDC would return less than the order's floor.
+  "Too little received":
+    "The swap into USDC would return less than the minimum. The price moved or the quote is stale; request a new quote, or raise `swapSlippageBps`.",
+  STF: "The token transfer failed: check the balance, the allowance, and that the token doesn't charge a fee on transfer.",
 };
 
 function formatAmount(value: bigint, decimals: number): string {

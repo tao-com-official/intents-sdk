@@ -25,8 +25,23 @@ export interface KnownToken {
   address: Address;
   decimals: number;
   isNative?: boolean;
-  /** Whether it can be used as the input (paid) token. Only USDC today. */
+  /**
+   * Whether it can be used as the input (paid) token. Besides USDC (paid directly), the settler swaps native
+   * and ERC-20 inputs to USDC through Uniswap V3 before escrowing, so those need a funded pool against USDC.
+   */
   input?: boolean;
+}
+
+/**
+ * Uniswap V3 deployment the settler swaps through when the input isn't USDC.
+ */
+export interface UniswapConfig {
+  /** QuoterV2, used to size the minimum USDC the swap must return. */
+  quoterV2: Address;
+  /** The chain's wrapped native token (WETH / wTAO): what a native input is swapped as. */
+  wrappedNative: Address;
+  /** Fee tier tried first when pricing a swap; the other tiers are tried if it has no liquidity. */
+  defaultFee: number;
 }
 
 export interface ChainConfig {
@@ -42,8 +57,12 @@ export interface ChainConfig {
   tokens: KnownToken[];
   /** Whether native TAO can be delivered to a Substrate (SS58) coldkey on this chain. Subtensor EVM only. */
   substrateRecipients?: boolean;
+  /** Whether a Substrate coldkey can open intents here through `evm.call`, without an EVM wallet. Subtensor EVM only. */
+  substrateEvmCall?: boolean;
   /** Default validator hotkey (SS58) alpha is staked to when `alphaHotkey` isn't given. Subtensor EVM only. */
   defaultAlphaHotkey?: string;
+  /** Uniswap V3 deployment for non-USDC inputs. Without it, only USDC can be paid on this chain. */
+  uniswap?: UniswapConfig;
 }
 
 export const ETHEREUM = 1;
@@ -61,9 +80,14 @@ export const DEFAULT_CHAINS: Record<number, ChainConfig> = {
     explorerUrl: "https://etherscan.io",
     intents: "0x2831Ea5524f171735aF8FEB2e331821bef176C8A",
     usdc: USDC_ETH,
+    uniswap: {
+      quoterV2: "0x61fFE014bA17989E743c5F6cB21bF9697530B21e",
+      wrappedNative: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+      defaultFee: 500,
+    },
     tokens: [
       { symbol: "USDC", name: "USD Coin", address: USDC_ETH, decimals: 6, input: true },
-      { symbol: "ETH", name: "Ether", address: NATIVE_TOKEN_ADDRESS, decimals: 18, isNative: true },
+      { symbol: "ETH", name: "Ether", address: NATIVE_TOKEN_ADDRESS, decimals: 18, isNative: true, input: true },
     ],
   },
   [SUBTENSOR_EVM]: {
@@ -75,13 +99,20 @@ export const DEFAULT_CHAINS: Record<number, ChainConfig> = {
     intents: "0x24834012973b6e70997a23C7aAB01481d46CB8E1",
     usdc: USDC_SUBTENSOR,
     substrateRecipients: true,
+    substrateEvmCall: true,
     // The official TAO.com validator.
     defaultAlphaHotkey: "5HK5tp6t2S59DywmHRWPBVJeJ86T61KjurYqeooqj8sREpeN",
+    uniswap: {
+      quoterV2: "0xC52476b7e73789f45E8bDe1863653439f1170d01",
+      wrappedNative: "0x134f59E8B8637FD70ae12f263492B1dc73A25D1e",
+      // 3000, not 500: the 0.05% wTAO/USDC pool was drained in 2026-09 and quotes garbage on dust.
+      defaultFee: 3_000,
+    },
     tokens: [
       // On-chain symbol is `USDC.e`; we expose it as USDC like the docs do.
       { symbol: "USDC", name: "USDC.e", address: USDC_SUBTENSOR, decimals: 6, input: true },
-      { symbol: "wTAO", name: "Wrapped TAO", address: "0x134f59E8B8637FD70ae12f263492B1dc73A25D1e", decimals: 18 },
-      { symbol: "TAO", name: "TAO", address: NATIVE_TOKEN_ADDRESS, decimals: 18, isNative: true },
+      { symbol: "wTAO", name: "Wrapped TAO", address: "0x134f59E8B8637FD70ae12f263492B1dc73A25D1e", decimals: 18, input: true },
+      { symbol: "TAO", name: "TAO", address: NATIVE_TOKEN_ADDRESS, decimals: 18, isNative: true, input: true },
     ],
   },
 };
@@ -146,7 +177,7 @@ export function resolveToken(chain: ChainConfig, token: string): TokenInfo {
   const netuid = parseAlphaToken(token);
   if (netuid !== undefined) {
     if (!chain.substrateRecipients) {
-      throw new UnsupportedRouteError(`${chain.name} can't deliver subnet alpha tokens. They are only available on Subtensor EVM.`);
+      throw new UnsupportedRouteError(`${chain.name} can't deliver or take subnet alpha tokens. They are only available on Subtensor EVM.`);
     }
     // Alpha is staked, not transferred: the order names the native sentinel and the stake rides in `subtensorData`.
     return { chainId: chain.id, symbol: `SN${netuid}`, name: `Subnet ${netuid} alpha`, address: NATIVE_TOKEN_ADDRESS, decimals: 9, isNative: false, netuid };

@@ -24,6 +24,10 @@ export const intentsAbi = parseAbi([
   "error FullSettler__NonCanonicalRecipient()",
   "error FullSettler__ProtocolFeeExceedsMax()",
   "error FullSettler__InvalidCall()",
+  "error FullSettler__SwapRouterNotSet()",
+  "error FullSettler__SwapAmountTooLow()",
+  "error SubtensorStakingLib__LowerThanExpectedTaoAfterUnstake()",
+  "error SubtensorStakingLib__InvalidAmount()",
 ]);
 
 /** `InputOrderData` must be encoded as ONE tuple (like Solidity's `abi.encode(struct)`). */

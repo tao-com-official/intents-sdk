@@ -58,10 +58,29 @@ export function openLog(opts: { fillDeadline: number; destinationChainId: number
   };
 }
 
+export const STAKING = "0x0000000000000000000000000000000000000805";
+export const ALPHA_PRECOMPILE = "0x0000000000000000000000000000000000000808";
+export const MIRROR_COLDKEY: Hex = `0x${"5e".repeat(32)}`;
+
 export interface MockChainState {
   protocolFeeBps?: number;
   balance?: bigint;
   allowance?: bigint;
+  /** Native balance (`getBalance`). */
+  nativeBalance?: bigint;
+  /** Decimals returned for an ERC-20 `decimals()` read; `undefined` makes the read revert. */
+  decimals?: number | null;
+  /** What `getGasPrice` returns (wei). */
+  gasPrice?: bigint;
+  /** Alpha (rao) staked by the mirror coldkey; and what the settler may move. */
+  stake?: bigint;
+  stakeAllowance?: bigint;
+  /** What `simSwapAlphaForTao` returns (TAO in rao). */
+  simProceedsRao?: bigint;
+  /** USDC out of QuoterV2 per fee tier; a tier missing from the map (or `"revert"`) reverts like an empty pool. */
+  quoterOut?: Record<number, bigint | "revert">;
+  /** Make a plain `approve(spender, amount)` simulation fail (USDT-style tokens). */
+  approveSimulateFails?: boolean;
   fillRecord?: Hex;
   orderStatus?: number;
   simulateError?: unknown;
@@ -73,20 +92,35 @@ export interface MockChainState {
 }
 
 export function mockPublicClient(state: MockChainState = {}) {
-  const s = { protocolFeeBps: 30, balance: 1_000_000_000n, allowance: 0n, fillRecord: `0x${"0".repeat(64)}` as Hex, orderStatus: 1, ...state };
+  const s = { protocolFeeBps: 30, balance: 1_000_000_000n, allowance: 0n, nativeBalance: 10n ** 24n, gasPrice: 10_000_000_000n, decimals: 18 as number | null, stake: 10n ** 12n, stakeAllowance: 0n, simProceedsRao: 2_000_000_000n, quoterOut: {} as Record<number, bigint | "revert">, approveSimulateFails: false, fillRecord: `0x${"0".repeat(64)}` as Hex, orderStatus: 1, ...state };
   const client = {
-    readContract: vi.fn(async ({ functionName }: { functionName: string }) => {
+    getBalance: vi.fn(async () => s.nativeBalance),
+    getGasPrice: vi.fn(async () => s.gasPrice),
+    readContract: vi.fn(async ({ functionName, address }: { functionName: string; address?: string }) => {
       switch (functionName) {
         case "protocolFeeBps": return s.protocolFeeBps;
         case "ONCHAIN_ORDER_DATA_TYPEHASH": return TYPEHASH;
         case "balanceOf": return s.balance;
-        case "allowance": return s.allowance;
+        case "allowance": return address === STAKING ? s.stakeAllowance : s.allowance;
+        case "decimals":
+          if (s.decimals === null) throw new Error("execution reverted");
+          return s.decimals;
+        case "getStake": return s.stake;
+        case "addressMapping": return MIRROR_COLDKEY;
+        case "simSwapAlphaForTao": return s.simProceedsRao;
         case "fillRecords": return s.fillRecord;
         case "orderStatus": return s.orderStatus;
         default: throw new Error(`unexpected read ${functionName}`);
       }
     }),
-    simulateContract: vi.fn(async () => {
+    simulateContract: vi.fn(async (args?: { functionName?: string; args?: unknown[] }) => {
+      if (args?.functionName === "quoteExactInputSingle") {
+        const fee = (args.args![0] as { fee: number }).fee;
+        const out = s.quoterOut[fee];
+        if (out === undefined || out === "revert") throw new Error("execution reverted: SPL");
+        return { result: [out, 0n, 0, 0n] };
+      }
+      if (args?.functionName === "approve" && s.approveSimulateFails) throw new Error("execution reverted");
       if (s.simulateError) throw s.simulateError;
       return {};
     }),

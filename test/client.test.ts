@@ -68,7 +68,7 @@ describe("getQuote", () => {
     [{ originChainId: 1, destinationChainId: 964, outputToken: "TAO", amount: "1.1234567" }, "decimal places"],
     [{ originChainId: 1, destinationChainId: 964, outputToken: "TAO" }, "exactly one"],
     [{ originChainId: 1, destinationChainId: 964, outputToken: "DOGE", amount: "1" }, "Unknown token"],
-    [{ originChainId: 1, destinationChainId: 964, inputToken: "ETH", outputToken: "TAO", amount: "1" }, "must be USDC"],
+    [{ originChainId: 1, destinationChainId: 964, inputToken: "DOGE", outputToken: "TAO", amount: "1" }, "Unknown token"],
     [{ originChainId: 1, destinationChainId: 10, outputToken: "TAO", amount: "1" }, "not supported"],
     [{ originChainId: 1, destinationChainId: 964, outputToken: "TAO", amount: "1", fillDeadline: NOW - 1 }, "future"],
     [{ originChainId: 1, destinationChainId: 964, outputToken: "TAO", amount: "1", fillDeadline: NOW + 100_000 }, "1 day"],

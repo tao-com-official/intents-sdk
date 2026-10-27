@@ -3,10 +3,32 @@ import { inputOrderDataParams, SUBTENSOR_OP_TRANSFER_TAO, subtensorDataParams } 
 
 const ZERO_BYTES32: Hex = `0x${"0".repeat(64)}`;
 
+/**
+ * How a non-USDC input becomes the escrowed USDC: the settler swaps it through Uniswap V3 inside `open()`.
+ * The order's `inputAmount` is then the minimum USDC that swap must return.
+ */
+export interface OrderSwap {
+  /**
+   * What the settler swaps from: the token address for an ERC-20 (pulled with `transferFrom`), the
+   * native-token sentinel for native input (paid as `msg.value`), or the zero address for an alpha input
+   * (the settler unstakes the alpha itself, and `subtensorData` says which).
+   */
+  inputTokenToSwapFrom: Address;
+  /** Native / ERC-20: the amount swapped. Alpha: the minimum native TAO (wei) the unstake must produce. */
+  inputAmountToSwapFrom: bigint;
+  poolFee: number;
+  /** Unix seconds; the swap reverts after it. */
+  swapDeadline: number;
+}
+
 export interface BuildOrderInput {
   user: Address;
+  /** Always the origin chain's USDC: the escrow asset. */
   inputToken: Address;
+  /** USDC escrowed. For a swap input, the minimum USDC the swap must return. */
   inputAmount: bigint;
+  /** Set for native, ERC-20 and alpha inputs; omit to pay USDC directly. */
+  swap?: OrderSwap;
   outputToken: Address;
   outputAmount: bigint;
   destinationChainId: number;
@@ -16,7 +38,8 @@ export interface BuildOrderInput {
   orderDataType: Hex;
   /**
    * ABI-encoded TaoFullSettler `SubtensorData`. Set for Substrate payouts, where `outputToken` must be the
-   * native-token sentinel and the coldkey travels here rather than in `recipient`. Default `"0x"`.
+   * native-token sentinel and the coldkey travels here rather than in `recipient`, and for alpha inputs,
+   * where it names the stake to unstake. Default `"0x"`.
    */
   subtensorData?: Hex;
 }
@@ -34,15 +57,21 @@ export function encodeTransferTao(recipientColdkey: Hex, amount: bigint): Hex {
   ]);
 }
 
-/** Build the `OnchainCrossChainOrder` for a USDC-input transfer to an EVM recipient or a Substrate coldkey. */
+/**
+ * Build the `OnchainCrossChainOrder` to an EVM recipient or a Substrate coldkey. The input is paid in USDC
+ * unless `swap` says the settler should swap it into USDC first.
+ *
+ * The contract reverts silently when a USDC-direct order carries a pool fee or swap deadline, so those are
+ * only written when there is a swap.
+ */
 export function buildOrder(input: BuildOrderInput) {
   const orderData = encodeAbiParameters(inputOrderDataParams, [
     {
       user: input.user,
-      inputTokenToSwapFrom: zeroAddress, // zero selects the plain USDC path
-      poolFee: 0,
-      inputAmountToSwapFrom: 0n,
-      swapDeadline: 0,
+      inputTokenToSwapFrom: input.swap?.inputTokenToSwapFrom ?? zeroAddress, // zero selects the plain USDC path
+      poolFee: input.swap?.poolFee ?? 0,
+      inputAmountToSwapFrom: input.swap?.inputAmountToSwapFrom ?? 0n,
+      swapDeadline: input.swap?.swapDeadline ?? 0,
       inputToken: input.inputToken,
       inputAmount: input.inputAmount,
       outputToken: input.outputToken,
