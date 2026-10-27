@@ -300,6 +300,7 @@ export const REVERT_REASONS: Record<string, string> = {
 function formatAmount(value: bigint, decimals: number): string {
   const s = value.toString().padStart(decimals + 1, "0");
   const whole = s.slice(0, s.length - decimals);
-  const frac = s.slice(s.length - decimals).replace(/0+$/, "");
+  let frac = s.slice(s.length - decimals);
+  while (frac.endsWith("0")) frac = frac.slice(0, -1);
   return frac ? `${whole}.${frac}` : whole;
 }

@@ -1391,6 +1391,13 @@ function buildOrderSwap(quote: Quote, swap: SwapPlan, swapDeadline: number): Ord
   }
 }
 
+/** Digits with at most one dot and at least one digit ("1", "1.5", ".5", "1."), checked without backtracking. */
+function isDecimalNumber(text: string): boolean {
+  const [whole = "", frac, ...extra] = text.split(".");
+  if (extra.length > 0 || !/^\d*$/.test(whole) || (frac !== undefined && !/^\d*$/.test(frac))) return false;
+  return whole.length + (frac?.length ?? 0) > 0;
+}
+
 function parseInputAmount(
   params: { amount?: string; amountRaw?: bigint },
   token: { symbol: string; decimals: number },
@@ -1403,7 +1410,7 @@ function parseInputAmount(
   if (amountRaw !== undefined) {
     value = amountRaw;
   } else {
-    if (!/^\d*\.?\d+$|^\d+\.$/.test(amount!.trim())) {
+    if (!isDecimalNumber(amount!.trim())) {
       throw new InvalidParamsError(`\`amount\` "${amount}" is not a valid decimal number.`);
     }
     const [, frac = ""] = amount!.trim().split(".");
