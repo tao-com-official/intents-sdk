@@ -11,6 +11,7 @@ export type {
   SubstrateExecuteParams,
   SubstrateExecuteResult,
   RecoverRefundParams,
+  RecoverStakeParams,
 } from "./client";
 
 export { Order } from "./order";

@@ -4,7 +4,7 @@ import { TaoIntents, type ProgressEvent } from "../src";
 import { inputOrderDataParams, subtensorDataParams } from "../src/abi";
 import { encodeAlphaStakeInput, STAKING_PRECOMPILE } from "../src/alpha";
 import { buildOrder } from "../src/order-data";
-import { applySlippage, quoteUsdcMinOut, resolveSwapEstimate, usableRoute } from "../src/swap";
+import { applySlippage, quoteUsdcMinOut, resolveSwapEstimate, usableRoute, usdToUsdc } from "../src/swap";
 import { encodeSs58 } from "../src/substrate";
 import { DEFAULT_CHAINS } from "../src/config";
 import { jsonResponse, MIRROR_COLDKEY, mockPublicClient, mockWalletClient, NOW, openLog, quoterBody, USER, type MockChainState } from "./helpers";
@@ -30,6 +30,8 @@ function swapBody(opts: { route?: { poolFeeTier: number; amountOut: string } | n
   const body = quoterBody(opts.outputAmount);
   if (opts.inputSubtensorData) (body.quote.preview.inputs[0] as { subtensorData?: string }).subtensorData = opts.inputSubtensorData;
   const route = opts.route === undefined ? { poolFeeTier: 500, amountOut: "100000000" } : opts.route;
+  // the input is worth a little more than the pool pays for it
+  if (route) (body.quote.preview.inputs[0] as { userPaysUsd?: string }).userPaysUsd = ((Number(route.amountOut) / 1e6) * 1.01).toFixed(2);
   return route ? { ...body, route: { tokenIn: WETH, tokenOut: USDC_ETH, ...route } } : body;
 }
 
@@ -154,6 +156,17 @@ describe("quoteUsdcMinOut", () => {
   });
 });
 
+describe("usdToUsdc", () => {
+  it("reads the Quoter's USD values as USDC base units", () => {
+    expect(usdToUsdc("51.506936")).toBe(51_506_936n);
+    expect(usdToUsdc("2")).toBe(2_000_000n);
+    expect(usdToUsdc("0.1234567")).toBe(123_456n);
+    expect(usdToUsdc(undefined)).toBeUndefined();
+    expect(usdToUsdc("abc")).toBeUndefined();
+    expect(usdToUsdc("-1")).toBeUndefined();
+  });
+});
+
 describe("resolveSwapEstimate", () => {
   const base = (origin: ReturnType<typeof mockPublicClient>) => ({
     client: origin.client as never,
@@ -165,11 +178,36 @@ describe("resolveSwapEstimate", () => {
     chainName: "Ethereum",
   });
 
-  it("prefers the Quoter's route and skips the pool", async () => {
-    const origin = mockPublicClient();
+  it("keeps the Quoter's route when the pool agrees with it", async () => {
+    const origin = mockPublicClient({ quoterOut: { 500: 1_020_000n } }); // 2% apart
     const estimate = await resolveSwapEstimate({ ...base(origin), route: { poolFeeTier: 500, amountOut: "1000000" } });
     expect(estimate).toEqual({ quotedUsdc: 1_000_000n, minUsdc: 990_000n, poolFee: 500, source: "quoter" });
-    expect(origin.client.simulateContract).not.toHaveBeenCalled();
+    expect(origin.client.simulateContract).toHaveBeenCalledTimes(1); // only the tier the Quoter chose
+  });
+
+  it("keeps the Quoter's route when the pool can't be asked", async () => {
+    const origin = mockPublicClient(); // no pool quotes: every tier reverts
+    const estimate = await resolveSwapEstimate({ ...base(origin), route: { poolFeeTier: 500, amountOut: "1000000" } });
+    expect(estimate).toMatchObject({ source: "quoter", minUsdc: 990_000n });
+  });
+
+  it("prices from the pool when the route is far below it (a floor that protects nothing)", async () => {
+    const origin = mockPublicClient({ quoterOut: { 500: 5_000_000n } });
+    const estimate = await resolveSwapEstimate({ ...base(origin), route: { poolFeeTier: 500, amountOut: "10" } });
+    expect(estimate).toEqual({ quotedUsdc: 5_000_000n, minUsdc: 4_950_000n, poolFee: 500, source: "onchain" });
+  });
+
+  it("prices from the pool when the route is far above it (a floor the swap can't meet)", async () => {
+    const origin = mockPublicClient({ quoterOut: { 500: 1_000_000n } });
+    const estimate = await resolveSwapEstimate({ ...base(origin), route: { poolFeeTier: 500, amountOut: "2000000" } });
+    expect(estimate).toMatchObject({ source: "onchain", quotedUsdc: 1_000_000n });
+  });
+
+  it("refuses a floor far under what the input is worth, whatever the output token", async () => {
+    const origin = mockPublicClient();
+    const route = { poolFeeTier: 500, amountOut: "1000" };
+    await expect(resolveSwapEstimate({ ...base(origin), route, referenceUsdc: 100_000_000n })).rejects.toMatchObject({ code: "SWAP_QUOTE_FAILED", message: expect.stringContaining("the input is worth") });
+    await expect(resolveSwapEstimate({ ...base(origin), route, referenceUsdc: 1_500n })).resolves.toMatchObject({ source: "quoter" });
   });
 
   it("falls back to the pool when the route is unusable", async () => {

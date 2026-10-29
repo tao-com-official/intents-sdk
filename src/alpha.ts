@@ -11,6 +11,7 @@ export const stakingAbi = parseAbi([
   "function getStake(bytes32 hotkey, bytes32 coldkey, uint256 netuid) view returns (uint256)",
   "function allowance(address sourceAddress, address spenderAddress, uint256 netuid) view returns (uint256)",
   "function approve(address spenderAddress, uint256 netuid, uint256 absoluteAmount)",
+  "function transferStake(bytes32 destination_coldkey, bytes32 hotkey, uint256 origin_netuid, uint256 destination_netuid, uint256 amount)",
 ]);
 const alphaAbi = parseAbi(["function simSwapAlphaForTao(uint16 netuid, uint64 alpha) view returns (uint256)"]);
 const addressMappingAbi = parseAbi(["function addressMapping(address target_address) view returns (bytes32)"]);
