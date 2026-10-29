@@ -192,18 +192,23 @@ export class SubstrateError extends TaoIntentsError {
 }
 
 /**
- * The Substrate batch ran but the intent was not opened: the EVM call inside it reverted, or the batch's
- * closing sweep (which only clears when `open` succeeded) failed. Nothing was escrowed; the batch is atomic
- * except for a native input, whose reverted call leaves the TAO at the account's EVM address.
+ * The Substrate batch ran but the intent was not opened: the EVM call inside it reverted, or no `Open` event
+ * came out of it. A revert doesn't roll the batch back (the extrinsic still succeeds), so what the batch had
+ * already moved stays moved: for a native input the TAO funded for it stays at the account's EVM address
+ * (the next batch reuses it); for alpha, `strandedAlpha` names the stake now parked at the account's EVM mirror,
+ * which `recoverStake` returns to the coldkey.
  */
 export class EvmCallFailedError extends TaoIntentsError {
   readonly extrinsicHash: `0x${string}` | undefined;
   /** The raw `evm.ExecutedFailed` event data, when that is how the failure showed. */
   readonly details: unknown;
-  constructor(message: string, extrinsicHash?: `0x${string}`, details?: unknown) {
+  /** Alpha input only: the subnet and hotkey of the stake left at the mirror. Pass them to `recoverStake`. */
+  readonly strandedAlpha: { netuid: number; hotkey: `0x${string}` } | undefined;
+  constructor(message: string, extrinsicHash?: `0x${string}`, details?: unknown, strandedAlpha?: { netuid: number; hotkey: `0x${string}` }) {
     super("EVM_CALL_FAILED", message);
     this.extrinsicHash = extrinsicHash;
     this.details = details;
+    this.strandedAlpha = strandedAlpha;
   }
 }
 

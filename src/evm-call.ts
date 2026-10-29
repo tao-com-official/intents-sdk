@@ -18,8 +18,7 @@ import type { SubstrateCall, SubstrateEvent } from "./substrate-signer";
 const DECIMAL_GAP = 1_000_000_000n;
 /** Subtensor's existential deposit. The mirror is never swept below it, so it isn't reaped on every swap. */
 const EXISTENTIAL_DEPOSIT_RAO = 500n;
-/** Mortal-era length of the extrinsic, in blocks (~51 min). A wallet may take minutes to show a batch it can't decode. */
-export const EVM_CALL_ERA_PERIOD = 256;
+
 
 /**
  * Gas limits. `open` is given twice the gas it needs ("headroom"): the EVM forwards only 63/64 of the gas it
@@ -145,13 +144,12 @@ function gasPlan(a: { valueWei: bigint; gasLimit: bigint; assumedGas: bigint; ga
  * Native input: fund the mirror (amount + gas), `open`, sweep. Alpha input: move the stake to the mirror,
  * fund gas, approve the settler on the staking precompile (skipped if already allowed), `open`, sweep.
  *
- * The closing sweep returns the unused gas, and is also what makes the batch atomic: `evm.call` succeeds as an
- * extrinsic even when the EVM call inside it reverts, so without a last call that can fail, a reverting `open`
- * would leave the alpha parked at the mirror while the batch reported success. A revert burns the whole gas
- * limit; sizing the sweep above real usage but well below the limit means a normal run gets its gas back
- * and a reverting one leaves too little, taking the whole batch down. A native input can't rely on this: a
- * reverted call hands its `msg.value` back, so the sweep still clears. Those are caught from the
- * `evm.ExecutedFailed` event instead (`readOpenedOrder`).
+ * The closing sweep returns the unused gas. It is also a partial guard: a call that runs out of gas burns the whole
+ * limit and the sweep then fails, rolling the batch back. A call that *reverts* does not: the EVM refunds the unused
+ * gas, the sweep clears and the batch commits with `open` having done nothing, so the alpha stays staked at the
+ * mirror (and a native input's TAO stays at the EVM address). That is why the order is simulated first, and why a
+ * revert that gets through is reported from the `evm.ExecutedFailed` event (`readOpenedOrder`), with
+ * `buildEvmCallStakeBatch` to bring the stake back.
  */
 export function buildEvmCallBatch(a: EvmCallBatchArgs): EvmCallBatch {
   // Funding and sweep are in rao, `evm.call`'s value in wei: a value that isn't a whole rao would be
@@ -225,6 +223,52 @@ export function buildEvmCallTransferBatch(a: {
   if (fundRao > 0n) calls.push({ section: "balances", method: "transferKeepAlive", args: [a.mirror, fundRao] });
   calls.push(
     evmCall(a.source, a.token, encodeFunctionData({ abi: erc20Abi, functionName: "transfer", args: [a.to, a.amountRaw] }), 0n, gasLimit, a.gasPriceWei),
+  );
+  if (sweepRao > 0n) calls.push({ section: "evm", method: "withdraw", args: [a.source, sweepRao] });
+  return { calls, fundRao, requiredRao, sweepRao };
+}
+
+/**
+ * Gas for the staking precompile's `transferStake`. Not measured on-chain, unlike the other limits: sized well
+ * above the ~25k an `approve` through the same precompile costs. The limit is twice this, the sweep assumes this.
+ */
+const STAKE_TRANSFER_GAS = 300_000n;
+
+/**
+ * The batch that moves stake out of the mirror (the account `evm.call` acts as) back to the coldkey: what is left
+ * there when `open` reverted after the stake had been moved in. The EVM address calls the staking precompile's
+ * `transferStake`, so it is signed once by the coldkey like the open was.
+ */
+export function buildEvmCallStakeBatch(a: {
+  coldkey: Hex;
+  source: Address;
+  mirror: Hex;
+  hotkey: Hex;
+  netuid: number;
+  amountRao: bigint;
+  gasPriceWei: bigint;
+  mirrorFreeRao: bigint;
+}): EvmCallBatch {
+  if (a.amountRao <= 0n) throw new InvalidParamsError("There is no stake to move.");
+  const gasLimit = STAKE_TRANSFER_GAS * GAS_LIMIT_HEADROOM;
+  const { requiredRao, fundRao, sweepRao } = gasPlan({
+    valueWei: 0n,
+    gasLimit,
+    assumedGas: STAKE_TRANSFER_GAS,
+    gasPriceWei: a.gasPriceWei,
+    mirrorFreeRao: a.mirrorFreeRao,
+  });
+  const calls: SubstrateCall[] = [];
+  if (fundRao > 0n) calls.push({ section: "balances", method: "transferKeepAlive", args: [a.mirror, fundRao] });
+  calls.push(
+    evmCall(
+      a.source,
+      STAKING_PRECOMPILE,
+      encodeFunctionData({ abi: stakingAbi, functionName: "transferStake", args: [a.coldkey, a.hotkey, BigInt(a.netuid), BigInt(a.netuid), a.amountRao] }),
+      0n,
+      gasLimit,
+      a.gasPriceWei,
+    ),
   );
   if (sweepRao > 0n) calls.push({ section: "evm", method: "withdraw", args: [a.source, sweepRao] });
   return { calls, fundRao, requiredRao, sweepRao };

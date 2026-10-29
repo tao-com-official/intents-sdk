@@ -18,6 +18,13 @@ const FEE_TIER_SET = new Set<number>(FEE_TIERS);
 const MIN_FLOOR_RATIO_PERCENT = 50n;
 
 /**
+ * How far the Quoter's `route.amountOut` may sit from the pool's own price (QuoterV2, same fee tier) before the
+ * SDK stops trusting it. The Quoter's amount becomes the order's floor, so a number too low removes the slippage
+ * protection and one too high makes the swap revert. The two are normally within a fraction of a percent.
+ */
+const MAX_ROUTE_DEVIATION_PERCENT = 5n;
+
+/**
  * Longest a single fee tier may take to price. A drained pool can cost millions of gas to quote (the 0.05%
  * wTAO/USDC pool took 6s on Subtensor's public RPC, and far longer when the node was cold), and the RPC
  * client retries on top of that. One slow tier must not hold up the rest, so a tier that misses this is
@@ -92,6 +99,27 @@ function isRevert(error: unknown): boolean {
  * Prices `amountIn` of `tokenIn` into USDC on every fee tier and keeps the best output. (Taking the first
  * tier that quotes would accept a drained pool's dust quote, which signs an order that can't be filled.)
  */
+async function quoteTier(
+  client: PublicClient,
+  uniswap: UniswapConfig,
+  usdc: Address,
+  tokenIn: Address,
+  amountIn: bigint,
+  fee: number,
+  timeoutMs: number,
+): Promise<bigint> {
+  const { result } = await withTimeout(
+    client.simulateContract({
+      address: uniswap.quoterV2,
+      abi: quoterV2Abi,
+      functionName: "quoteExactInputSingle",
+      args: [{ tokenIn, tokenOut: usdc, amountIn, fee, sqrtPriceLimitX96: 0n }],
+    }),
+    timeoutMs,
+  );
+  return result[0];
+}
+
 export async function quoteUsdcMinOut(args: {
   client: PublicClient;
   uniswap: UniswapConfig;
@@ -108,16 +136,7 @@ export async function quoteUsdcMinOut(args: {
   const results = await Promise.allSettled(
     tiers.map(async (fee, i) => {
       if (i > 0) await sleep(i * TIER_STAGGER_MS);
-      const { result } = await withTimeout(
-        client.simulateContract({
-          address: uniswap.quoterV2,
-          abi: quoterV2Abi,
-          functionName: "quoteExactInputSingle",
-          args: [{ tokenIn, tokenOut: usdc, amountIn, fee, sqrtPriceLimitX96: 0n }],
-        }),
-        args.tierTimeoutMs ?? TIER_TIMEOUT_MS,
-      );
-      return { fee, out: result[0] };
+      return { fee, out: await quoteTier(client, uniswap, usdc, tokenIn, amountIn, fee, args.tierTimeoutMs ?? TIER_TIMEOUT_MS) };
     }),
   );
 
@@ -163,21 +182,54 @@ export async function resolveSwapEstimate(args: {
   route: QuoterRoute | undefined;
   /** The Quoter's promised output in USDC base units. Pass only when the output is USDC. */
   promisedUsdc?: bigint;
+  /**
+   * What the input is worth in USDC base units according to the Quoter's USD value of it. A coarse sanity bound
+   * for any output: the floor may not be far under it.
+   */
+  referenceUsdc?: bigint;
 }): Promise<SwapEstimate> {
   const hop = usableRoute(args.route);
-  const estimate: SwapEstimate = hop
-    ? {
-        quotedUsdc: hop.minOut,
-        minUsdc: applySlippage(hop.minOut, args.slippageBps),
-        poolFee: hop.poolFee,
-        source: "quoter",
-      }
-    : await quoteUsdcMinOut(args);
-
-  if (args.promisedUsdc !== undefined && estimate.minUsdc * 100n < args.promisedUsdc * MIN_FLOOR_RATIO_PERCENT) {
-    throw new SwapQuoteError(
-      `The swap into USDC would return ${estimate.minUsdc} base units at minimum, far under the ${args.promisedUsdc} the quote promised. Request a new quote or pay with USDC.`,
+  let estimate: SwapEstimate;
+  if (hop) {
+    estimate = {
+      quotedUsdc: hop.minOut,
+      minUsdc: applySlippage(hop.minOut, args.slippageBps),
+      poolFee: hop.poolFee,
+      source: "quoter",
+    };
+    // The Quoter's amount is only a claim: check it against the pool on the tier it chose. Where the two
+    // disagree the pool wins (the order is then priced from it). If the pool can't be asked, the claim stands
+    // and the sanity bounds below still apply.
+    const onchain = await quoteTier(args.client, args.uniswap, args.usdc, args.tokenIn, args.amountIn, hop.poolFee, args.tierTimeoutMs ?? TIER_TIMEOUT_MS).catch(
+      () => undefined,
     );
+    if (onchain !== undefined && onchain > 0n) {
+      const gap = hop.minOut > onchain ? hop.minOut - onchain : onchain - hop.minOut;
+      if (gap * 100n > onchain * MAX_ROUTE_DEVIATION_PERCENT) {
+        estimate = { quotedUsdc: onchain, minUsdc: applySlippage(onchain, args.slippageBps), poolFee: hop.poolFee, source: "onchain" };
+      }
+    }
+  } else {
+    estimate = await quoteUsdcMinOut(args);
+  }
+
+  for (const [bound, what] of [
+    [args.promisedUsdc, "the quote promised"],
+    [args.referenceUsdc, "the input is worth"],
+  ] as const) {
+    if (bound !== undefined && estimate.minUsdc * 100n < bound * MIN_FLOOR_RATIO_PERCENT) {
+      throw new SwapQuoteError(
+        `The swap into USDC would return ${estimate.minUsdc} base units at minimum, far under the ${bound} ${what}. Request a new quote or pay with USDC.`,
+      );
+    }
   }
   return estimate;
+}
+
+/** `"51.506936"` (the Quoter's USD values) as USDC base units, rounded down; `undefined` if it isn't a plain decimal. */
+export function usdToUsdc(usd: string | undefined): bigint | undefined {
+  if (usd === undefined) return undefined;
+  const [whole = "", frac = "", ...extra] = usd.trim().split(".");
+  if (extra.length > 0 || whole === "" || !/^\d+$/.test(whole) || !/^\d*$/.test(frac)) return undefined;
+  return BigInt(whole) * 1_000_000n + BigInt(frac.padEnd(6, "0").slice(0, 6));
 }

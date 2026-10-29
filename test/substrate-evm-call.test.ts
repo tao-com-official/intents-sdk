@@ -10,6 +10,7 @@ import { jsonResponse, MIRROR_COLDKEY, mockPublicClient, mockWalletClient, NOW, 
 
 const INTENTS: Address = DEFAULT_CHAINS[964]!.intents;
 const USDC_964: Address = DEFAULT_CHAINS[964]!.usdc;
+const WTAO: Address = DEFAULT_CHAINS[964]!.uniswap!.wrappedNative;
 const COLDKEY: Hex = `0x${Array.from({ length: 32 }, (_, i) => (i + 1).toString(16).padStart(2, "0")).join("")}`;
 const SOURCE = evmAddressOfAccountId(COLDKEY);
 const COLDKEY_SS58 = encodeSs58(COLDKEY);
@@ -38,7 +39,9 @@ function fakeSigner(opts: { events?: ReturnType<typeof openedEvents>; spendable?
 }
 
 function swapBody() {
-  return { ...quoterBody("45000000"), route: { tokenIn: DEFAULT_CHAINS[964]!.uniswap!.wrappedNative, tokenOut: USDC_964, poolFeeTier: 3000, amountOut: "50000000" } };
+  const body = quoterBody("45000000");
+  body.quote.preview.inputs[0]!.userPaysUsd = "50.5";
+  return { ...body, route: { tokenIn: DEFAULT_CHAINS[964]!.uniswap!.wrappedNative, tokenOut: USDC_964, poolFeeTier: 3000, amountOut: "50000000" } };
 }
 
 /** Subtensor EVM -> Ethereum. The mock chain starts with an empty EVM balance at the account's H160. */
@@ -173,6 +176,13 @@ describe("getQuote for a Substrate account", () => {
     expect(sent).toMatchObject({ userAddress: SOURCE, recipient: RECIPIENT });
   });
 
+  it("names the Substrate account as the source of native TAO, as a `transfer_tao` leg", async () => {
+    const { sdk, fetchMock } = setup();
+    await sdk.getQuote({ ...nativeParams, amount: "1" });
+    const sent = JSON.parse((fetchMock.mock.calls[0] as unknown as [string, { body: string }])[1].body);
+    expect(sent.subtensor).toEqual({ side: "source", operation: "transfer_tao", recipientColdkey: COLDKEY_SS58, amount: (10n ** 18n).toString() });
+  });
+
   it("needs a recipient: the account's own EVM address has no key", async () => {
     const { sdk } = setup();
     const { recipient: _recipient, ...rest } = nativeParams;
@@ -228,8 +238,11 @@ describe("open from a Substrate account", () => {
     expect(open.args[1]).toBe(INTENTS);
     expect(open.args[3]).toBe(10n ** 18n);
     expect(decodeOpen(open)).toMatchObject({ user: SOURCE, inputTokenToSwapFrom: "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE", inputAmountToSwapFrom: 10n ** 18n });
-    // the H160 holds nothing before the batch funds it, so there is nothing to simulate `open` from
-    expect(origin.client.simulateContract).not.toHaveBeenCalled();
+    // simulated from the wrapped native token's address (it holds the TAO), as the user of an otherwise identical order
+    const simulated = origin.client.simulateContract.mock.calls.find(([a]) => (a as { functionName: string }).functionName === "open")![0] as { account: Address; value: bigint; args: [{ orderData: Hex }] };
+    expect(simulated.account).toBe(WTAO);
+    expect(simulated.value).toBe(10n ** 18n);
+    expect(decodeAbiParameters(inputOrderDataParams, simulated.args[0].orderData)[0]).toMatchObject({ user: WTAO, inputAmountToSwapFrom: 10n ** 18n });
 
     expect(result).toMatchObject({ orderId: ORDER_ID, extrinsicHash: `0x${"11".repeat(32)}`, blockHash: `0x${"22".repeat(32)}` });
     expect(result.order).toMatchObject({ orderId: ORDER_ID, originChainId: 964, destinationChainId: 1 });
@@ -274,6 +287,46 @@ describe("open from a Substrate account", () => {
     const quote = await sdk.getQuote({ ...nativeParams, amount: "1" });
     await expect(sdk.open({ quote, substrate: signer })).rejects.toMatchObject({ code: "INSUFFICIENT_BALANCE", message: expect.stringContaining("TAO") });
     expect(signAndSendBatch).not.toHaveBeenCalled();
+  });
+
+  it("refuses before signing when the pre-flight simulation reverts", async () => {
+    const { ContractFunctionRevertedError } = await import("viem");
+    const { sdk } = setup({ origin: { simulateError: new ContractFunctionRevertedError({ abi: intentsAbi, functionName: "open", message: "x", data: "0x" as Hex }) } });
+    const { signer, signAndSendBatch } = fakeSigner();
+    const quote = await sdk.getQuote({ ...nativeParams, amount: "1" });
+    await expect(sdk.open({ quote, substrate: signer })).rejects.toMatchObject({ code: "CONTRACT_REVERT" });
+    expect(signAndSendBatch).not.toHaveBeenCalled();
+  });
+
+  it("goes ahead when the node can't run the pre-flight at all", async () => {
+    const { sdk } = setup({ origin: { simulateError: new Error("rpc is down") } });
+    const { signer, signAndSendBatch } = fakeSigner();
+    const quote = await sdk.getQuote({ ...nativeParams, amount: "1" });
+    await sdk.open({ quote, substrate: signer });
+    expect(signAndSendBatch).toHaveBeenCalledTimes(1);
+  });
+
+  it("pre-flights an alpha input's swap leg as native TAO, with the expected unstake proceeds", async () => {
+    const { sdk, origin } = setup({ origin: { stake: 5_000_000_000n, simProceedsRao: 2_000_000_000n } });
+    const quote = await sdk.getQuote({ ...alphaParams, amount: "1" });
+    await sdk.open({ quote, substrate: fakeSigner().signer });
+    const simulated = origin.client.simulateContract.mock.calls.find(([a]) => (a as { functionName: string }).functionName === "open")![0] as { account: Address; value: bigint; args: [{ orderData: Hex }] };
+    expect(simulated.account).toBe(WTAO);
+    expect(simulated.value).toBe(2n * 10n ** 18n);
+    expect(decodeAbiParameters(inputOrderDataParams, simulated.args[0].orderData)[0]).toMatchObject({
+      user: WTAO,
+      inputTokenToSwapFrom: "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE",
+      inputAmountToSwapFrom: 2n * 10n ** 18n,
+      subtensorData: "0x",
+    });
+  });
+
+  it("names the stake an alpha revert leaves behind, and how to get it back", async () => {
+    const { sdk } = setup({ origin: { stake: 5_000_000_000n } });
+    const { signer } = fakeSigner({ events: [{ section: "evm", method: "ExecutedFailed", data: [INTENTS] }] as never });
+    const quote = await sdk.getQuote({ ...alphaParams, amount: "1" });
+    const error = await sdk.open({ quote, substrate: signer }).catch((e) => e);
+    expect(error).toMatchObject({ code: "EVM_CALL_FAILED", message: expect.stringContaining("recoverStake"), strandedAlpha: { netuid: 64, hotkey: quote.alphaInput!.hotkey } });
   });
 
   it("reports an EVM revert inside an otherwise successful batch", async () => {
@@ -403,7 +456,7 @@ describe("execute from a Substrate account", () => {
 });
 
 function quoterBodyWithRoute(validUntil: number) {
-  return { ...quoterBody("45000000", validUntil), route: swapBody().route };
+  return { ...swapBody(), quote: { ...swapBody().quote, validUntil } };
 }
 
 describe("recoverRefund", () => {
@@ -438,6 +491,32 @@ describe("recoverRefund", () => {
     const { signer } = fakeSigner();
     await expect(sdk.recoverRefund({ substrate: signer, originChainId: 964, to: RECIPIENT, token: "TAO" })).rejects.toMatchObject({ code: "UNSUPPORTED_ROUTE" });
     await expect(sdk.recoverRefund({ substrate: signer, originChainId: 1, to: RECIPIENT })).rejects.toMatchObject({ code: "UNSUPPORTED_ROUTE" });
+  });
+});
+
+describe("recoverStake", () => {
+  const hotkey = "5HK5tp6t2S59DywmHRWPBVJeJ86T61KjurYqeooqj8sREpeN";
+
+  it("moves the stake parked at the mirror back to the coldkey, as the account's EVM address", async () => {
+    const { sdk } = setup({ origin: { stake: 7_000_000_000n } });
+    const { signer, signAndSendBatch } = fakeSigner({ events: [{ section: "evm", method: "Executed", data: [] }] as never });
+    const result = await sdk.recoverStake({ substrate: signer, originChainId: 964, netuid: 64, hotkey });
+    expect(result.amount).toBe(7_000_000_000n);
+    const calls = signAndSendBatch.mock.calls[0]![0];
+    expect(methods(calls)).toEqual(["balances.transferKeepAlive", "evm.call", "evm.withdraw"]);
+    expect(calls[1]!.args.slice(0, 2)).toEqual([SOURCE, STAKING_PRECOMPILE]);
+    expect(decodeFunctionData({ abi: stakingAbi, data: calls[1]!.args[2] as Hex })).toMatchObject({
+      functionName: "transferStake",
+      args: [COLDKEY, expect.any(String), 64n, 64n, 7_000_000_000n],
+    });
+  });
+
+  it("refuses more than is staked, nothing staked, and a reverted transfer", async () => {
+    const { signer } = fakeSigner({ events: [{ section: "evm", method: "ExecutedFailed", data: [] }] as never });
+    const { sdk } = setup({ origin: { stake: 100n } });
+    await expect(sdk.recoverStake({ substrate: signer, originChainId: 964, netuid: 64, hotkey, amountRaw: 101n })).rejects.toMatchObject({ code: "INSUFFICIENT_BALANCE" });
+    await expect(sdk.recoverStake({ substrate: signer, originChainId: 964, netuid: 64, hotkey })).rejects.toMatchObject({ code: "EVM_CALL_FAILED" });
+    await expect(setup({ origin: { stake: 0n } }).sdk.recoverStake({ substrate: signer, originChainId: 964, netuid: 64, hotkey })).rejects.toMatchObject({ code: "INVALID_PARAMS" });
   });
 });
 
@@ -484,7 +563,7 @@ describe("polkadotSigner", () => {
     return { api, signAsync, calls, signed };
   }
 
-  it("batches the calls, signs with a long era, and returns the extrinsic's events as JSON", async () => {
+  it("batches the calls, signs with polkadot-js's default era, and returns the extrinsic's events as JSON", async () => {
     const { api, signAsync, calls } = fakeApi();
     const injected = { signPayload: vi.fn() };
     const signer = polkadotSigner({ api, account: COLDKEY_SS58, signer: injected });
@@ -495,7 +574,7 @@ describe("polkadotSigner", () => {
     );
     expect(calls.map((c) => `${c.section}.${c.method}`)).toEqual(["balances.transferKeepAlive", "evm.withdraw"]);
     expect(calls[0]!.args).toEqual(["0xaa", 5n]);
-    expect(signAsync).toHaveBeenCalledWith(COLDKEY_SS58, expect.objectContaining({ signer: injected, era: 256, nonce: -1, withSignedTransaction: true }));
+    expect(signAsync).toHaveBeenCalledWith(COLDKEY_SS58, expect.objectContaining({ signer: injected, era: 32, nonce: -1, withSignedTransaction: true }));
     expect(order).toEqual(["beforeSubmit", "signed:0x3333"]);
     expect(result).toMatchObject({ extrinsicHash: `0x${"33".repeat(32)}`, blockHash: `0x${"44".repeat(32)}` });
     expect(result.events).toEqual([{ section: "evm", method: "Log", data: [{ address: INTENTS, topics: [OPEN_TOPIC, ORDER_ID] }] }]);

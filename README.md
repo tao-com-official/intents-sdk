@@ -183,7 +183,9 @@ await intents.execute({ wallet, originChainId: 1, destinationChainId: 964, outpu
 | Subnet alpha (`SN<netuid>`) | A staking-precompile approval, then `open` (see below). |
 
 How the USDC floor is set: the Quoter reports the Uniswap hop it priced (`quote.swapRoute`: fee tier and expected USDC).
-`open` uses that, minus `swapSlippageBps` (default 100 = 1%). If the Quoter sent none, the SDK asks Uniswap's QuoterV2
+`open` checks it against the pool's own price on that tier and uses it, minus `swapSlippageBps` (default 100 = 1%), when
+they are within 5%; otherwise the pool's price is used. A floor under half of what the input is worth (or of what the
+quote promised, for a USDC output) throws. If the Quoter sent none, the SDK asks Uniswap's QuoterV2
 itself on every fee tier and keeps the best output. A floor far below what the quote promised throws
 `SwapQuoteError` rather than signing an order nobody can fill. The `swap-quoted` progress event reports the result.
 
@@ -236,8 +238,8 @@ alpha. The SDK builds one `utility.batchAll` that the coldkey signs; inside it t
 - native TAO: fund that address with the amount plus gas, call `open`;
 - alpha: `transfer_stake` to the address's mirror account, fund gas, approve the settler on the staking precompile
   (skipped if already allowed), call `open`;
-- in both, sweep the unused gas back to the coldkey. The sweep is also what makes the batch atomic for alpha: if `open`
-  reverts it burns the gas the sweep needs and the whole batch (stake move included) rolls back.
+- in both, sweep the unused gas back to the coldkey. The sweep only rolls the batch back when `open` runs out of gas;
+  an ordinary revert refunds the unused gas, so the batch commits with `open` having done nothing (see below).
 
 The SDK has no Substrate dependency: you give it a `SubstrateSigner`. `polkadotSigner` adapts a polkadot-js `ApiPromise`
 (connected over WebSocket) and an extension signer or keyring pair.
@@ -267,13 +269,18 @@ optionally, `spendableAfterFee(calls)` so the SDK can refuse before asking for a
 - **Alpha: amounts that are the whole stake lose 2 rao** (`quote.inputAmount` shows it): the stake move needs that much
   headroom to clear. The alpha must sit at the coldkey, on `alphaHotkey`.
 - **Native TAO amounts are limited to 9 decimals** (whole rao).
-- There is no pre-flight simulation of `open` (the account's EVM address holds nothing until the batch funds it, and the
-  public node ignores balance overrides). A reverted `open` is caught from the batch's events and throws
-  `EvmCallFailedError`; for a native input the TAO then stays at that address, available to the next batch.
+- **Pre-flight.** The account's own EVM address holds nothing until the batch funds it, so the SDK simulates `open` from
+  the wrapped TAO's address instead (it holds the TAO): the same order for a native input; for alpha, its swap leg paid as
+  native TAO, since the unstake can't be simulated without a stake. A revert there (floor the pool can't meet, paused
+  contract...) is thrown before anything is signed. It can't cover the unstake itself.
+- **A revert that gets through doesn't roll the batch back.** The extrinsic still succeeds, so it throws
+  `EvmCallFailedError` after the fact: for a native input the TAO stays at the account's EVM address (the next batch reuses
+  it); for alpha the stake stays at that address's mirror, and `error.strandedAlpha` names it.
+  `recoverStake({ substrate, originChainId: 964, netuid, hotkey })` moves it back to the coldkey with one signature.
 - The result has no EVM transaction: `extrinsicHash` / `blockHash` replace `txHash`, and `order.openTxHash` is unset.
-  Progress events are `substrate-submitted` and `substrate-confirmed`. The extrinsic is mortal for ~51 minutes, since
-  a wallet that can't decode the batch makes users read before signing; the SDK vetoes a signature that leaves the fill
-  deadline under 60s.
+  Progress events are `substrate-submitted` and `substrate-confirmed`. The extrinsic is mortal for 32 blocks (~6.4 min,
+  `polkadotSigner({ eraPeriod })`): the SDK vetoes a signature that leaves the fill deadline under 60s, so a longer era
+  would only keep a signed batch valid longer in the pool. Raise it for a pinned, distant `fillDeadline`.
 - Fees: the batch's extrinsic fee scales with its gas limits (measured live ~0.0067 TAO native, ~0.027 TAO with an
   alpha approval) and is paid by the coldkey on top of the gas it funds.
 
@@ -344,7 +351,7 @@ Every failure is a `TaoIntentsError` with a stable `code`; nothing is opened on-
 | `TransactionRevertedError` | `TRANSACTION_REVERTED` | Mined but reverted; has `txHash`. |
 | `WalletError` | `WALLET_ERROR` | Wallet/network problem. |
 | `SubstrateError` | `SUBSTRATE_ERROR` | Signing or submitting the Substrate extrinsic failed; `dispatchError` / `extrinsicHash` when known. |
-| `EvmCallFailedError` | `EVM_CALL_FAILED` | The Substrate batch ran but `open` didn't (reverted inside the EVM, or no `Open` event). Nothing was opened. |
+| `EvmCallFailedError` | `EVM_CALL_FAILED` | The Substrate batch ran but `open` didn't (reverted inside the EVM, or no `Open` event). No intent was opened; the batch's earlier moves stay (see `strandedAlpha`, `recoverStake`). |
 | `OrderNotFoundError` | `ORDER_NOT_FOUND` | Wrong chain, or hash isn't an intent. |
 | `OutputBelowMinimumError` | `OUTPUT_BELOW_MINIMUM` | Your `minOutputAmount` / `slippageBps` guard. Nothing was sent. |
 | `TransactionReplacedError` | `TRANSACTION_REPLACED` | The user cancelled or replaced the transaction in the wallet; no intent was opened. |

@@ -14,7 +14,7 @@ export interface QuoterRequest {
   fillDeadline?: number;
   /** Substrate payout leg, sent instead of `recipient`. Coldkey and hotkey are SS58 addresses. */
   subtensor?:
-    | { side: "destination"; operation: "transfer_tao"; recipientColdkey: string }
+    | { side: "destination" | "source"; operation: "transfer_tao"; recipientColdkey: string; amount?: string }
     | { side: "destination"; operation: "alpha_stake"; netuid: number; delegatorHotkey: string; recipientColdkey: string }
     /** Alpha input: the stake the settler unstakes. `amount` is the alpha in rao; the coldkey owns it. */
     | { side: "source"; operation: "alpha_stake"; netuid: number; delegatorHotkey: string; recipientColdkey: string; amount: string };

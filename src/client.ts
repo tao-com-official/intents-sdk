@@ -34,6 +34,7 @@ import {
 } from "./config";
 import {
   AbortedError,
+  ContractRevertError,
   EvmCallFailedError,
   IndicativeQuoteError,
   InsufficientBalanceError,
@@ -53,6 +54,7 @@ import {
 import {
   alphaSellLeavingSlack,
   buildEvmCallBatch,
+  buildEvmCallStakeBatch,
   buildEvmCallTransferBatch,
   evmAddressOfAccountId,
   readOpenedOrder,
@@ -64,7 +66,7 @@ import { Order, type OrderContext, type OrderRef } from "./order";
 import { encodeSs58, parseSubstrateAddress } from "./substrate";
 import { requestQuote, type QuoterRequest } from "./quoter";
 import type { SubstrateBatchResult, SubstrateCall, SubstrateSigner } from "./substrate-signer";
-import { applySlippage, resolveSwapEstimate, type SwapEstimate } from "./swap";
+import { applySlippage, resolveSwapEstimate, usdToUsdc, type SwapEstimate } from "./swap";
 import type { CallOptions, InputKind, Quote, QuoteParams, TokenInput, WalletLike } from "./types";
 import { connectWallet, ensureWalletChain, type ConnectedWallet } from "./wallet";
 
@@ -166,6 +168,16 @@ export interface SubstrateExecuteResult extends SubstrateOpenResult {
   quote: Quote;
 }
 
+export interface RecoverStakeParams extends CallOptions {
+  substrate: SubstrateSigner;
+  originChainId: number;
+  netuid: number;
+  /** The hotkey the stranded alpha is staked to (SS58 or 32-byte `0x`). */
+  hotkey: string;
+  /** Rao of alpha to move. Defaults to everything staked there. */
+  amountRaw?: bigint;
+}
+
 export interface RecoverRefundParams extends CallOptions {
   substrate: SubstrateSigner;
   originChainId: number;
@@ -196,7 +208,8 @@ interface ResolvedInput {
 
 interface SwapPlan {
   estimate: SwapEstimate;
-  /** Alpha inputs: the minimum native TAO (wei) the unstake must produce. */
+  /** Alpha inputs: what unstaking is expected to produce (wei), and the minimum the unstake must produce. */
+  expectedTaoWei?: bigint;
   minTaoWei?: bigint;
 }
 
@@ -427,7 +440,18 @@ export class TaoIntents {
       inputAmount: inputAmount.toString(),
       userAddress: user,
       // A Substrate payout is requested through a `subtensor` leg instead of `recipient`.
-      ...(alphaIn
+      ...(substrateAccount && input.kind === "native"
+        ? {
+            // The Quoter prices this the same with or without it; it names the Substrate account the TAO comes from.
+            subtensor: {
+              side: "source" as const,
+              operation: "transfer_tao" as const,
+              recipientColdkey: encodeSs58(substrateAccount),
+              amount: inputAmount.toString(),
+            },
+            recipient,
+          }
+        : alphaIn
         ? {
             subtensor: {
               side: "source" as const,
@@ -800,6 +824,38 @@ export class TaoIntents {
     return { extrinsicHash: result.extrinsicHash, blockHash: result.blockHash, amount };
   }
 
+  /**
+   * Move subnet alpha staked at the EVM address a Substrate account acts as back to the coldkey. After an alpha
+   * `open` from a Substrate account reverts, the batch still commits and leaves the stake there
+   * (`EvmCallFailedError.strandedAlpha`). One signature, no EVM gas.
+   */
+  async recoverStake(params: RecoverStakeParams): Promise<{ extrinsicHash: Hex; blockHash: Hex; amount: bigint }> {
+    const { substrate, signal, onProgress } = params;
+    throwIfAborted(signal);
+    const origin = getChainConfig(this.#chains, params.originChainId);
+    const { coldkey, source } = this.#substrateIdentity(origin, substrate);
+    const parsedHotkey = parseSubstrateAddress(params.hotkey);
+    if (!parsedHotkey) throw new InvalidParamsError("`hotkey` must be an SS58 address or a 32-byte `0x` AccountId32.");
+    if (!Number.isInteger(params.netuid) || params.netuid < 0) throw new InvalidParamsError("`netuid` must be a subnet number.");
+    const client = this.#publicClient(origin.id);
+
+    const { mirror, gasPriceWei, mirrorFreeRao } = await this.#readEvmCallState(origin, source, signal);
+    const staked = await abortable(readStake(client, parsedHotkey.accountId, mirror, params.netuid), signal);
+    const amount = params.amountRaw ?? staked;
+    if (amount <= 0n) throw new InvalidParamsError(`No SN${params.netuid} alpha is staked to that hotkey at ${source}'s mirror.`);
+    if (amount > staked) throw new InsufficientBalanceError(amount, staked, `SN${params.netuid} alpha (at the EVM mirror)`, 9);
+
+    const batch = buildEvmCallStakeBatch({
+      coldkey, source, mirror, hotkey: parsedHotkey.accountId, netuid: params.netuid, amountRao: amount, gasPriceWei, mirrorFreeRao,
+    });
+    await this.#assertSpendable(substrate, batch, "TAO (for gas)", signal);
+    const result = await this.#signBatch(substrate, batch.calls, { signal, onProgress });
+    if (result.events.some((e) => e.section === "evm" && e.method === "ExecutedFailed")) {
+      throw new EvmCallFailedError("The stake transfer reverted inside the batch. Nothing was moved.", result.extrinsicHash);
+    }
+    return { extrinsicHash: result.extrinsicHash, blockHash: result.blockHash, amount };
+  }
+
   // ------------------------------------------------------------------- tracking
 
   /** Re-create an `Order` from a persisted reference (`order.toJSON()`). */
@@ -897,8 +953,13 @@ export class TaoIntents {
     quote: Quote;
     swap: SwapPlan | undefined;
     signal?: AbortSignal;
+    /**
+     * Build the order for a simulation instead: as another `user`, and (alpha inputs) with the swap leg alone, paid
+     * as native TAO, since the unstake can't be simulated from an account with no stake.
+     */
+    as?: { user: Address; nativeProceedsWei?: bigint };
   }): Promise<{ order: ReturnType<typeof buildOrder>; value: bigint; fillDeadline: number }> {
-    const { origin, destination, quote, swap, signal } = args;
+    const { origin, destination, quote, swap, signal, as } = args;
     const maxProtocolFeeBps = quote.protocolFeeBps ?? (await abortable(this.#readProtocolFee(origin), signal));
     const orderDataType = await abortable(this.#getTypehash(origin), signal);
 
@@ -910,9 +971,12 @@ export class TaoIntents {
         `The fill deadline is less than ${MIN_FILL_WINDOW_SECONDS}s away, too short for a solver to fill. Request a new quote with a later \`fillDeadline\`.`,
       );
     }
-    const orderSwap = swap && buildOrderSwap(quote, swap, fillDeadline);
+    const orderSwap =
+      as?.nativeProceedsWei !== undefined
+        ? { inputTokenToSwapFrom: NATIVE_TOKEN_ADDRESS, inputAmountToSwapFrom: as.nativeProceedsWei, poolFee: swap!.estimate.poolFee, swapDeadline: fillDeadline }
+        : swap && buildOrderSwap(quote, swap, fillDeadline);
     const order = buildOrder({
-      user: quote.user!,
+      user: as?.user ?? quote.user!,
       inputToken: origin.usdc,
       inputAmount: swap ? swap.estimate.minUsdc : quote.inputAmount,
       swap: orderSwap,
@@ -920,13 +984,13 @@ export class TaoIntents {
       outputAmount: quote.orderOutputAmount,
       destinationChainId: destination.id,
       recipient: quote.recipient!,
-      subtensorData: quote.alphaInput?.subtensorData ?? quote.subtensorData,
+      subtensorData: (as?.nativeProceedsWei === undefined && quote.alphaInput?.subtensorData) || quote.subtensorData,
       maxProtocolFeeBps,
       fillDeadline,
       orderDataType,
     });
     // A native input is the transaction's value: the settler wraps it before swapping.
-    const value = quote.inputKind === "native" ? quote.inputAmount : 0n;
+    const value = as?.nativeProceedsWei ?? (quote.inputKind === "native" ? quote.inputAmount : 0n);
     return { order, value, fillDeadline };
   }
 
@@ -971,9 +1035,40 @@ export class TaoIntents {
 
     const { order, value, fillDeadline } = await this.#assembleOrder({ origin, destination, quote, swap, signal });
 
-    // No simulation here: `open` has to run as the account's EVM address, which holds nothing until the batch funds
-    // it (the public node ignores a balance override), and an alpha stake only reaches the mirror inside the batch.
-    // What can be checked first is above (stake, pricing); a revert inside the batch is caught from its events.
+    // `open` can't be simulated as the account's own EVM address: it holds nothing until the batch funds it (the public
+    // node ignores a balance override), and an alpha stake only reaches the mirror inside the batch. A revert inside the
+    // batch doesn't undo it, so the order is simulated from the wrapped native token's address, which holds the TAO: for
+    // a native input the very same order with that address as `user`, for alpha its swap leg paid as native TAO (the
+    // unstake itself can't be simulated). That catches a floor the pool can't meet, a paused contract, a bad fee cap.
+    const wrapped = origin.uniswap?.wrappedNative;
+    if (wrapped) {
+      const sim = await this.#assembleOrder({
+        origin,
+        destination,
+        quote,
+        swap,
+        signal,
+        as: { user: wrapped, ...(alpha && { nativeProceedsWei: swap!.expectedTaoWei! }) },
+      });
+      try {
+        await abortable(
+          client.simulateContract({
+            account: wrapped,
+            address: origin.intents,
+            abi: intentsAbi,
+            functionName: "open",
+            args: [sim.order],
+            ...(sim.value > 0n && { value: sim.value }),
+            ...(dataSuffix && { dataSuffix }),
+          }),
+          signal,
+        );
+      } catch (error) {
+        // Only a verdict from the contract counts; a node that can't run the call says nothing about the order.
+        const normalized = normalizeError(error, "open the intent");
+        if (normalized instanceof ContractRevertError || normalized instanceof AbortedError) throw normalized;
+      }
+    }
     const batch = buildEvmCallBatch({
       coldkey,
       source,
@@ -1001,7 +1096,21 @@ export class TaoIntents {
         }
       },
     });
-    const orderId = readOpenedOrder(result.events, origin.intents, result.extrinsicHash);
+    let orderId: Hex;
+    try {
+      orderId = readOpenedOrder(result.events, origin.intents, result.extrinsicHash);
+    } catch (error) {
+      if (error instanceof EvmCallFailedError && alpha) {
+        // The batch committed with the stake already moved to the mirror.
+        throw new EvmCallFailedError(
+          `${error.message} The ${quote.inputAmountFormatted} SN${alpha.netuid} alpha was moved to the account's EVM mirror before that and is still staked there: move it back with \`recoverStake\`.`,
+          error.extrinsicHash,
+          error.details,
+          { netuid: alpha.netuid, hotkey: alpha.hotkey },
+        );
+      }
+      throw error;
+    }
     onProgress?.({ step: "substrate-confirmed", extrinsicHash: result.extrinsicHash, blockHash: result.blockHash, orderId });
 
     const ref: OrderRef = { orderId, originChainId: origin.id, destinationChainId: destination.id, fillDeadline };
@@ -1203,11 +1312,11 @@ export class TaoIntents {
     let tokenIn: Address = quote.inputToken.address;
     let amountIn = quote.inputAmount;
     let minTaoWei: bigint | undefined;
+    let expectedTaoWei: bigint | undefined;
     if (quote.inputKind === "native") {
       tokenIn = uniswap.wrappedNative;
     } else if (quote.inputKind === "alpha") {
       const alpha = quote.alphaInput!;
-      let expectedTaoWei: bigint;
       try {
         expectedTaoWei = await abortable(simulateUnstakeProceeds(client, alpha.netuid, alpha.amount), signal);
       } catch (cause) {
@@ -1217,7 +1326,7 @@ export class TaoIntents {
           cause,
         );
       }
-      if (expectedTaoWei <= 0n) {
+      if (expectedTaoWei === undefined || expectedTaoWei <= 0n) {
         throw new SwapQuoteError(`Unstaking ${quote.inputAmountFormatted} SN${alpha.netuid} alpha would return no TAO.`);
       }
       tokenIn = uniswap.wrappedNative;
@@ -1238,11 +1347,12 @@ export class TaoIntents {
         chainName: origin.name,
         route: quote.swapRoute,
         promisedUsdc: outputIsUsdc ? quote.orderOutputAmount : undefined,
+        referenceUsdc: usdToUsdc(quote.inputUsd),
       }),
       signal,
     );
     onProgress?.({ step: "swap-quoted", ...estimate });
-    return { estimate, minTaoWei };
+    return { estimate, minTaoWei, expectedTaoWei };
   }
 
   /**

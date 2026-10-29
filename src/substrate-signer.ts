@@ -1,6 +1,5 @@
 import type { Hex } from "viem";
 import { SubstrateError, UserRejectedError } from "./errors";
-import { EVM_CALL_ERA_PERIOD } from "./evm-call";
 
 /** One extrinsic call, by pallet and method name, with its arguments. Hex strings are bytes / account ids. */
 export interface SubstrateCall {
@@ -55,6 +54,8 @@ export interface SubstrateSigner {
 
 // ------------------------------------------------------------------ polkadot-js adapter
 
+const DEFAULT_ERA_PERIOD = 32;
+
 /**
  * The slice of polkadot-js's `ApiPromise` the adapter uses. Declared structurally so the SDK needs no
  * dependency on `@polkadot/api`: pass your own `ApiPromise` (connected over WebSocket).
@@ -76,7 +77,12 @@ export interface PolkadotSignerOptions {
   /** polkadot-js `Signer` (e.g. `injector.signer` from `@polkadot/extension-dapp`). Not needed for a keyring pair. */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   signer?: any;
-  /** Mortal-era length in blocks. Default 256 (~51 min): a wallet that can't decode the batch makes users read before signing. */
+  /**
+   * Mortal-era length in blocks (~12s each). Default 32 (~6.4 min), polkadot-js's own. The era starts when signing
+   * starts and must outlast the wallet prompt; the SDK already vetoes a signature that leaves the order under 60s to
+   * fill, so a longer era only keeps a signed batch valid longer in the pool. Raise it for a pinned, distant
+   * `fillDeadline` or a slow signer (a signature that outlives its era is rejected as "bad signature").
+   */
   eraPeriod?: number;
   /** Existential deposit (rao) kept out of `spendableAfterFee`. Default 500. */
   existentialDepositRao?: bigint;
@@ -95,7 +101,7 @@ export interface PolkadotSignerOptions {
 export function polkadotSigner(options: PolkadotSignerOptions): SubstrateSigner {
   const { api, account, signer } = options;
   const address = typeof account === "string" ? account : account.address;
-  const eraPeriod = options.eraPeriod ?? EVM_CALL_ERA_PERIOD;
+  const eraPeriod = options.eraPeriod ?? DEFAULT_ERA_PERIOD;
   const existentialDeposit = options.existentialDepositRao ?? 500n;
 
   const build = (calls: SubstrateCall[]) =>
