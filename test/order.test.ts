@@ -13,6 +13,7 @@ function setup(origin = {}, dest = {}, now = NOW) {
     {
       getPublicClient: (id) => (id === 1 ? o.client : d.client) as never,
       getChainConfig: (id) => chains[id]!,
+      getSettler: async (id) => chains[id]!.intents,
       now: () => clock.now,
     },
   );

@@ -49,7 +49,7 @@ function setup(opts: { origin?: MockChainState; body?: unknown } = {}) {
   const origin = mockPublicClient({ nativeBalance: 0n, ...opts.origin });
   const dest = mockPublicClient();
   const fetchMock = vi.fn(async () => jsonResponse(opts.body ?? swapBody()));
-  const sdk = new TaoIntents({ fetch: fetchMock as never, publicClients: { 964: origin.client as never, 1: dest.client as never }, now: () => NOW });
+  const sdk = new TaoIntents({ settlerLookup: false, fetch: fetchMock as never, publicClients: { 964: origin.client as never, 1: dest.client as never }, now: () => NOW });
   return { sdk, origin, dest, fetchMock };
 }
 
@@ -395,6 +395,7 @@ describe("open from a Substrate account", () => {
     let now = NOW;
     const origin = mockPublicClient({ nativeBalance: 0n });
     const sdk = new TaoIntents({
+      settlerLookup: false,
       fetch: (async () => jsonResponse(swapBody())) as never,
       publicClients: { 964: origin.client as never, 1: mockPublicClient().client as never },
       now: () => now,
@@ -437,7 +438,7 @@ describe("execute from a Substrate account", () => {
     let n = 0;
     // the first quote is already out of date when open() looks at it
     const fetchMock = vi.fn(async () => jsonResponse(quoterBodyWithRoute(++n === 1 ? NOW : NOW + 60)));
-    const sdk = new TaoIntents({ fetch: fetchMock as never, publicClients: { 964: origin.client as never, 1: mockPublicClient().client as never }, now: () => NOW });
+    const sdk = new TaoIntents({ settlerLookup: false, fetch: fetchMock as never, publicClients: { 964: origin.client as never, 1: mockPublicClient().client as never }, now: () => NOW });
     const { signer, signAndSendBatch } = fakeSigner();
     const events: ProgressEvent[] = [];
     const { substrateAccount: _a, ...params } = nativeParams;

@@ -1,5 +1,6 @@
 import { defineChain, getAddress, isAddress, type Address, type Chain } from "viem";
 import { mainnet } from "viem/chains";
+import type { OrderTypehash } from "./abi";
 import { InvalidParamsError, UnsupportedRouteError } from "./errors";
 
 /** Placeholder address the contract and Quoter API use for the chain's native token. */
@@ -51,8 +52,16 @@ export interface ChainConfig {
   /** Default RPC used for reads. Override with `rpcUrls` on the client. */
   rpcUrl?: string;
   explorerUrl: string;
-  /** The Intents contract (FullSettler). */
+  /**
+   * The Intents contract (FullSettler). Built-in chains use the one the Quoter names instead, so they move to a
+   * new settler on their own; setting this in `chains` pins the address and skips that lookup.
+   */
   intents: Address;
+  /**
+   * Order format of an `intents` the SDK doesn't list in `KNOWN_SETTLERS` (a settler you deployed yourself).
+   * Ignored for listed settlers.
+   */
+  orderTypehash?: OrderTypehash;
   usdc: Address;
   tokens: KnownToken[];
   /** Whether native TAO can be delivered to a Substrate (SS58) coldkey on this chain. Subtensor EVM only. */

@@ -1,6 +1,6 @@
-import { decodeAbiParameters, pad, zeroAddress } from "viem";
+import { decodeAbiParameters, keccak256, pad, toHex, zeroAddress } from "viem";
 import { describe, expect, it } from "vitest";
-import { inputOrderDataParams, subtensorDataParams } from "../src/abi";
+import { inputOrderDataParams, subtensorDataParams, TYPEHASH_16AE, TYPEHASH_9737 } from "../src/abi";
 import { buildOrder, encodeTransferTao } from "../src/order-data";
 import { TYPEHASH, USER } from "./helpers";
 
@@ -65,5 +65,15 @@ describe("buildOrder with a Substrate payout", () => {
       recipientColdkey: COLDKEY,
       amount: 777n,
     });
+  });
+});
+
+describe("order typehashes", () => {
+  const FIELDS =
+    "address user,address inputTokenToSwapFrom,uint24 poolFee,uint256 inputAmountToSwapFrom,uint32 swapDeadline,address inputToken,uint256 inputAmount,address outputToken,uint256 outputAmount,uint256 destinationChainId,bytes32 recipient,uint16 maxProtocolFeeBps,bytes subtensorData";
+
+  it("match the InputOrderData each format encodes", () => {
+    expect(keccak256(toHex(`InputOrderData(${FIELDS})`))).toBe(TYPEHASH_16AE);
+    expect(keccak256(toHex(`InputOrderData(${FIELDS},address refundTo)`))).toBe(TYPEHASH_9737);
   });
 });
