@@ -23,6 +23,7 @@ import { intentsAbi, SUBTENSOR_OP_ALPHA_STAKE, SUBTENSOR_OP_TRANSFER_TAO, subten
 import {
   buildChains,
   DEFAULT_QUOTER_URL,
+  SUBTENSOR_EVM,
   NATIVE_TOKEN_ADDRESS,
   getChainConfig,
   resolveToken,
@@ -69,6 +70,16 @@ import type { SubstrateBatchResult, SubstrateCall, SubstrateSigner } from "./sub
 import { applySlippage, resolveSwapEstimate, usdToUsdc, type SwapEstimate } from "./swap";
 import type { CallOptions, InputKind, Quote, QuoteParams, TokenInput, WalletLike } from "./types";
 import { connectWallet, ensureWalletChain, type ConnectedWallet } from "./wallet";
+import {
+  encodeWstRedeem,
+  estimateWstRedeem,
+  WST_TOKEN_WEI_PER_UNIT,
+  wstAlphaAbi,
+  wstTaoAbi,
+  type WstRedeemCall,
+  type WstRedeemEstimate,
+  type WstVault,
+} from "./wst";
 
 export interface TaoIntentsOptions {
   /** Override the Quoter API endpoint. */
@@ -110,6 +121,31 @@ interface OpenParamsBase extends CallOptions {
    * Default 100 (1%).
    */
   swapSlippageBps?: number;
+}
+
+export interface WstRedeemEstimateParams extends Pick<CallOptions, "signal"> {
+  /** Chain the vault is on. Default Subtensor EVM (964). */
+  chainId?: number;
+  /** `"wstTao"`, or `{ netuid }` (> 0) for that subnet's wstAlpha vault. */
+  vault: WstVault;
+  /** wst balance to redeem, in 18-decimal token wei (the ERC-20 `balanceOf`). Only whole units (1e9 wei) are redeemed. */
+  amount: bigint;
+  /** How far, in basis points, the TAO paid may fall below the estimate before the redeem reverts. Default 100 (1%). */
+  slippageBps?: number;
+}
+
+export interface WstRedeemParams extends WstRedeemEstimateParams, CallOptions {
+  /** Wallet holding the wst tokens. It signs the redeem; no approval is needed (the vault burns its own tokens). */
+  wallet: WalletLike;
+  /** Subtensor EVM address paid the native TAO. Defaults to the connected account. */
+  receiver?: Address;
+}
+
+export interface WstRedeemResult {
+  txHash: Hash;
+  receiver: Address;
+  /** The estimate (and floors) the transaction was sent with. */
+  estimate: WstRedeemEstimate;
 }
 
 /** Open from an EVM wallet. */
@@ -854,6 +890,99 @@ export class TaoIntents {
       throw new EvmCallFailedError("The stake transfer reverted inside the batch. Nothing was moved.", result.extrinsicHash);
     }
     return { extrinsicHash: result.extrinsicHash, blockHash: result.blockHash, amount };
+  }
+
+  // ------------------------------------------------------------------ wst redeem
+
+  /**
+   * Estimate redeeming a wstTao / wstAlpha balance for native TAO, from the vault's own preview
+   * (`previewRedeem` / `previewRedeemToTao`), with the floors `wstRedeem` sends (`minTaoOut`, and for wstTao
+   * `minStakeToUnstake`). The vault is the chain's `wstTao`, or the on-chain
+   * `wstAlphaRegistry.vaultFor(netuid)`. A paused, recovering or otherwise reverting vault throws
+   * `ContractRevertError`; a zero estimate is never returned.
+   */
+  async estimateWstRedeem(params: WstRedeemEstimateParams): Promise<WstRedeemEstimate> {
+    const { signal, slippageBps = DEFAULT_SWAP_SLIPPAGE_BPS } = params;
+    throwIfAborted(signal);
+    assertSlippageBps(slippageBps, "slippageBps");
+    const chain = getChainConfig(this.#chains, params.chainId ?? SUBTENSOR_EVM);
+    return abortable(estimateWstRedeem(this.#publicClient(chain.id), chain, { vault: params.vault, amount: params.amount, slippageBps }), signal);
+  }
+
+  /**
+   * Calldata for the redeem an estimate describes: wstTao `redeem(units, receiver, minStakeToUnstake, minTaoOut)` or
+   * wstAlpha `redeemToTao(units, receiver, minTaoOut)`. Send it from the wallet that holds the tokens.
+   */
+  encodeWstRedeem(estimate: WstRedeemEstimate, receiver: Address): WstRedeemCall {
+    return encodeWstRedeem(estimate, parseAddress(receiver, "receiver"));
+  }
+
+  /**
+   * Redeem a wstTao / wstAlpha balance for native TAO paid to `receiver`: estimate, check the balance, simulate,
+   * send, and wait for the receipt. It stops there: to move the TAO on, quote and `open` a native TAO input.
+   */
+  async wstRedeem(params: WstRedeemParams): Promise<WstRedeemResult> {
+    const { signal, onProgress, slippageBps = DEFAULT_SWAP_SLIPPAGE_BPS } = params;
+    throwIfAborted(signal);
+    assertSlippageBps(slippageBps, "slippageBps");
+    const chain = getChainConfig(this.#chains, params.chainId ?? SUBTENSOR_EVM);
+    const publicClient = this.#publicClient(chain.id);
+    const wallet = await abortable(connectWallet(params.wallet), signal);
+    const receiver = params.receiver === undefined ? wallet.account : parseAddress(params.receiver, "receiver");
+
+    onProgress?.({ step: "switching-chain", chainId: chain.id });
+    await abortable(ensureWalletChain(wallet.client, toViemChain(chain)), signal);
+
+    const estimate = await abortable(
+      estimateWstRedeem(publicClient, chain, { vault: params.vault, amount: params.amount, slippageBps }),
+      signal,
+    );
+
+    onProgress?.({ step: "checking-balance" });
+    const balance = await abortable(
+      publicClient.readContract({ address: estimate.vault, abi: erc20Abi, functionName: "balanceOf", args: [wallet.account] }),
+      signal,
+    );
+    const needed = estimate.units * WST_TOKEN_WEI_PER_UNIT;
+    if (balance < needed) {
+      throw new InsufficientBalanceError(needed, balance, estimate.kind === "wstTao" ? "wstTAO" : `SN${estimate.netuid} wstAlpha`, 18);
+    }
+
+    const call =
+      estimate.kind === "wstTao"
+        ? ({
+            address: estimate.vault,
+            abi: wstTaoAbi,
+            functionName: "redeem",
+            args: [estimate.units, receiver, estimate.minStakeToUnstake!, estimate.minTaoOut],
+          } as const)
+        : ({
+            address: estimate.vault,
+            abi: wstAlphaAbi,
+            functionName: "redeemToTao",
+            args: [estimate.units, receiver, estimate.minTaoOut],
+          } as const);
+
+    try {
+      await abortable(publicClient.simulateContract({ account: wallet.account, ...call } as never), signal);
+    } catch (error) {
+      throw normalizeError(error, "redeem the wst tokens");
+    }
+
+    onProgress?.({ step: "awaiting-signature" });
+    let submitted: Hash;
+    try {
+      submitted = await abortable(
+        wallet.client.writeContract({ account: wallet.account, chain: toViemChain(chain), ...call } as never),
+        signal,
+      );
+    } catch (error) {
+      throw normalizeError(error, "send the redeem");
+    }
+    onProgress?.({ step: "submitted", txHash: submitted });
+    const receipt = await this.#confirm(publicClient, submitted, "redeem", signal);
+    onProgress?.({ step: "redeem-confirmed", txHash: receipt.transactionHash });
+    return { txHash: receipt.transactionHash, receiver, estimate };
   }
 
   // ------------------------------------------------------------------- tracking

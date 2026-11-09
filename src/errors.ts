@@ -292,6 +292,20 @@ export const REVERT_MESSAGES: Record<string, string> = {
   SubtensorStakingLib__LowerThanExpectedTaoAfterUnstake:
     "Unstaking the alpha returned less TAO than the minimum. The price moved; request a new quote, or raise the swap slippage.",
   SubtensorStakingLib__InvalidAmount: "The stake amount was rejected by the Subtensor staking precompile.",
+  // wstTao / wstAlpha vaults (redeem to native TAO).
+  ZeroUnitsOutstanding: "The wst vault is empty: there is nothing to redeem.",
+  VaultInsolvent: "The wst vault has no stake backing its units right now. Redeeming is blocked until it recovers.",
+  TaoRecoveryMode: "The wstAlpha vault is in TAO recovery mode: redeeming to TAO through the pool is disabled.",
+  HotkeyMigrationPending: "The wst vault is moving to a new validator. Try again once the migration completes.",
+  HotkeyMigrationIncomplete: "The wst vault is moving to a new validator. Try again once the migration completes.",
+  HotkeyMigrationNotReady: "The wst vault is moving to a new validator. Try again once the migration completes.",
+  InsufficientTaoOut: "The redeem would pay less TAO than the minimum. The rate moved; estimate again, or raise the slippage.",
+  InsufficientStakeOut: "The redeem would unstake less than the minimum. The vault rate moved; estimate again, or raise the slippage.",
+  AmountBelowMinStake: "The amount is below the chain's minimum stake, or would leave less than it in the vault. Redeem more, or all of it.",
+  AmountExceedsUint64: "The amount is too large to unstake in one redeem. Redeem it in smaller parts.",
+  NegligibleAmount: "The amount is too small to redeem.",
+  ZeroAlphaOut: "The amount is too small: it converts to 0 alpha.",
+  ZeroTaoOut: "The amount is too small: selling it returns 0 TAO.",
 };
 
 /** Explanations for revert strings from contracts the settler calls (matched on the exact text). */

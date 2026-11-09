@@ -189,6 +189,8 @@ export type ProgressEvent =
   | { step: "awaiting-signature" }
   | { step: "submitted"; txHash: Hash }
   | { step: "confirmed"; txHash: Hash; orderId: Hex }
+  /** `wstRedeem`: the redeem is mined and the native TAO paid. */
+  | { step: "redeem-confirmed"; txHash: Hash }
   /** Substrate account path: the batch is signed and about to be broadcast. */
   | { step: "substrate-submitted"; extrinsicHash: Hex }
   /** Substrate account path: the batch is in a block and the intent is open. */

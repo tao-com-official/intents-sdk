@@ -63,6 +63,13 @@ export interface ChainConfig {
   defaultAlphaHotkey?: string;
   /** Uniswap V3 deployment for non-USDC inputs. Without it, only USDC can be paid on this chain. */
   uniswap?: UniswapConfig;
+  /** The wstTao vault. Without it, wstTao can't be redeemed on this chain. */
+  wstTao?: Address;
+  /**
+   * The `wstAlphaRegistry` contract: `vaultFor(netuid)` gives a subnet's wstAlpha vault (it doesn't index wstTao).
+   * Without it, wstAlpha can't be redeemed on this chain.
+   */
+  wstAlphaRegistry?: Address;
 }
 
 export const ETHEREUM = 1;
@@ -108,6 +115,7 @@ export const DEFAULT_CHAINS: Record<number, ChainConfig> = {
       // 3000, not 500: the 0.05% wTAO/USDC pool was drained in 2026-09 and quotes garbage on dust.
       defaultFee: 3_000,
     },
+    // wstTao and wstAlphaRegistry: not deployed on mainnet yet. Set them here once they are (`chains[964]` overrides meanwhile).
     tokens: [
       // On-chain symbol is `USDC.e`; we expose it as USDC like the docs do.
       { symbol: "USDC", name: "USDC.e", address: USDC_SUBTENSOR, decimals: 6, input: true },
