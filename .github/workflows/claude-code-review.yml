@@ -51,6 +51,11 @@ jobs:
   # PR's own code, so it gets no secrets and a read-only token; the review job
   # only reads its result. A failing step does not fail this job: the review
   # reports it as a blocker instead.
+  #
+  # Never on issue_comment: that event runs in the base repository's context
+  # (its caches, a default-branch token), and the PR may come from a fork, so
+  # running the PR's code there is untrusted execution in a privileged workflow.
+  # A comment-triggered review reports the suite as not-run.
   # ─────────────────────────────────────────────────────────────────
   suite:
     name: Suite
@@ -58,11 +63,7 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'pull_request' && !github.event.pull_request.draft &&
        github.event.pull_request.user.login != 'dependabot[bot]' &&
-       github.event.pull_request.head.repo.full_name == github.repository) ||
-      (github.event_name == 'issue_comment' &&
-       github.event.issue.pull_request != null &&
-       contains(github.event.comment.body, '@claude review this') &&
-       contains(fromJson('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
+       github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
       contents: read
@@ -72,7 +73,6 @@ jobs:
       - name: Checkout the PR
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event_name == 'issue_comment' && format('refs/pull/{0}/merge', github.event.issue.number) || '' }}
           persist-credentials: false
 
       - uses: actions/setup-node@v6
@@ -161,11 +161,13 @@ jobs:
       CONTRACT: .review-base/.agents/local-skills/pr-review/references/review-contract.md
 
     steps:
-      # A comment-triggered run starts on the default branch, so check out the PR's merge ref explicitly.
-      - name: Checkout the PR
+      # On pull_request (same-repository branches only, see the job's `if`) and dispatch this is the code under
+      # review. On issue_comment it is the default branch: this job holds secrets and a write token, and the PR may
+      # come from a fork, so its files are never checked out here (a planted .claude/settings.json hook, for one,
+      # would run inside the review). The PR's merge commit is only fetched, for the diff (Fetch PR data).
+      - name: Checkout
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event_name == 'issue_comment' && format('refs/pull/{0}/merge', github.event.issue.number) || '' }}
           # A dispatch diffs against the base branch's merge-base, so it needs the history. A PR diffs its merge ref
           # against the ref's first parent, the base branch, so it needs one parent. (Quoted: a bare 0 is falsy here.)
           fetch-depth: ${{ github.event_name == 'workflow_dispatch' && '0' || '2' }}
@@ -216,9 +218,16 @@ jobs:
             printf '%s\n' "$DISPATCH_DESCRIPTION" >> $GITHUB_OUTPUT
             echo "${DELIM}" >> $GITHUB_OUTPUT
           else
-          # The checkout is the PR's merge ref, whose first parent is the base branch, so this is the PR's change on
-          # the current base. Truncate from a file rather than a pipe, so a large diff never fails the step.
-          git diff HEAD^1 HEAD > pr-diff-full.txt
+          # The PR's merge ref, whose first parent is the base branch, so this is the PR's change on the current base.
+          # On pull_request it is the checkout; on issue_comment it is fetched as objects only, never checked out.
+          # Truncate from a file rather than a pipe, so a large diff never fails the step.
+          if [ "$EVENT_NAME" = "issue_comment" ]; then
+            git fetch --no-tags --depth=2 origin "+refs/pull/${PR_NUMBER}/merge:refs/remotes/pull/merge"
+            MERGE=refs/remotes/pull/merge
+          else
+            MERGE=HEAD
+          fi
+          git diff "${MERGE}^1" "$MERGE" > pr-diff-full.txt
           head -c 400000 pr-diff-full.txt > pr-diff.txt
           echo "commit_sha=$(gh pr view ${{ steps.pr.outputs.number }} --json headRefOid -q .headRefOid)" >> $GITHUB_OUTPUT
 
@@ -246,6 +255,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
           BASE_REF: ${{ inputs.base_ref }}
           DISPATCH_DESCRIPTION: ${{ inputs.description }}
 
@@ -285,7 +295,7 @@ jobs:
 
             The diff is in `pr-diff.txt`. Use the Read tool to read it — if it exceeds the token
             limit, read in chunks using `offset` and `limit` params until you have the full file.
-            The PR's files are checked out at the repository root for context.
+            ${{ github.event_name == 'issue_comment' && 'The repository root holds the BASE branch, not the PR: the PR''s versions of the changed files are only in the diff. Read the root for the surrounding code, and take every changed line from the diff.' || 'The PR''s files are checked out at the repository root for context.' }}
 
             Suite result (typecheck, tests and build, run on this code by the workflow's suite job; empty means
             the suite job did not run): `${{ needs.suite.outputs.result }}`
