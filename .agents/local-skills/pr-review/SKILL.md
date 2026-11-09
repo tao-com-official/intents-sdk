@@ -93,8 +93,6 @@ Audit tests by the defects they would catch. For each new or changed behaviour, 
 
 Then check:
 
-- **Suite:** the suite result the workflow gives you. A failed step is a `blocker`: name the failing test or
-  compiler error from `suite-log.txt`.
 - **Missing tests:** acceptance criteria, new branches and error paths with no test under `test/`.
 - **Useless tests:** tests that cannot fail meaningfully, assert only mocks, restate the implementation, or duplicate
   another (`major`).

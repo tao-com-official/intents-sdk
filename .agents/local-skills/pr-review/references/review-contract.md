@@ -13,7 +13,7 @@ suite to run.
 | The slice diff | `pr-diff.txt` (the PR's diff against its base), plus the PR's files at the repository root for context |
 | `task.md` acceptance criteria | The PR title and description, and any Jira key it names. If the description states no goal or acceptance criteria, say so once as a `major` (`PR:missing-acceptance-criteria`) and judge fitness against the title |
 | `plan.md` locked decisions | Decisions the PR description states. A structure the description explicitly asks for is earned |
-| Running the suite and the gates | Do not run them yourself. The workflow's suite job runs `npm ci`, `npm run typecheck`, `npm test` and `npm run build` on the code under review and hands you its result line (`install=… typecheck=… test=… build=…`, each `success`, `failure` or `skipped`) and `suite-log.txt`, the tail of its output. A `failure` is a `blocker` (`suite:<step>`), citing the failing test or error from the log. Spend the rest of the review on what the suite cannot see |
+| Running the suite and the gates | Do not run or re-derive them. The `Checks` workflow runs `npm run typecheck`, `npm test` and `npm run build` on every PR, and its status sits on the PR next to this review. Spend the review on what those cannot see, and write `SUITE: not-run (Checks runs it)` |
 | The previous round's report | `previous-review.md`: this review's last report on this PR, if any |
 
 Standards (the skill and this contract, and `CLAUDE.md` if the repo has one) come from the base branch under
@@ -85,7 +85,7 @@ Write `review-body.md` in this order:
    BLOCKERS: <count>
    MAJORS: <count>
    NITS: <count>
-   SUITE: pass | fail (<failed steps>) | not-run (the suite job did not report)
+   SUITE: not-run (Checks runs it)
    OPEN: <blocker IDs with fingerprints, comma-separated, or none>
    NEW: <blocker IDs first raised in this review, or none>
    RESOLVED: <IDs from previous-review.md that are now fixed, or none>
@@ -102,4 +102,4 @@ starts with its ID and severity, for example `**B1 (blocker)** ...`.
 
 - Claim the PR is approved or fit for purpose.
 - Demand ceremony for code that is already simple, or invent layers.
-- Repeat what `tsc` or the test suite already enforces, beyond reporting a failing step.
+- Repeat what the `Checks` workflow (`tsc`, the test suite, the build) already enforces.
