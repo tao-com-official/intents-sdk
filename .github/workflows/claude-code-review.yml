@@ -1,8 +1,8 @@
 name: Claude Code Review
 
 # Ported from tao-com-official/tao.com-api (.github/workflows/claude-code-review.yml), with one review (pr-review)
-# instead of two (the SDK has no caching layer for a caching-review to check), and a suite job: no other workflow
-# runs the tests on a PR here, so this one runs them and hands the result to the review.
+# instead of two: the SDK has no caching layer for a caching-review to check. Typecheck, tests and build are the
+# Checks workflow's (checks.yml), not this one's, as the Quality workflow's are in tao.com-api.
 #
 # Dispatch mode (workflow_dispatch) reviews a pushed ref before any PR exists, so an agent can run the same review the
 # PR will get and fix its findings first. Contract, for callers:
@@ -47,82 +47,6 @@ concurrency:
 
 jobs:
   # ─────────────────────────────────────────────────────────────────
-  # The suite (typecheck, tests, build) on the code under review. It runs the
-  # PR's own code, so it gets no secrets and a read-only token; the review job
-  # only reads its result. A failing step does not fail this job: the review
-  # reports it as a blocker instead.
-  #
-  # Never on issue_comment: that event runs in the base repository's context
-  # (its caches, a default-branch token), and the PR may come from a fork, so
-  # running the PR's code there is untrusted execution in a privileged workflow.
-  # A comment-triggered review reports the suite as not-run.
-  # ─────────────────────────────────────────────────────────────────
-  suite:
-    name: Suite
-    if: |
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request' && !github.event.pull_request.draft &&
-       github.event.pull_request.user.login != 'dependabot[bot]' &&
-       github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    permissions:
-      contents: read
-    outputs:
-      result: ${{ steps.summary.outputs.result }}
-    steps:
-      - name: Checkout the PR
-        uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-
-      - uses: actions/setup-node@v6
-        with:
-          node-version: '24'
-          package-manager-cache: false
-
-      - name: Install
-        id: install
-        continue-on-error: true
-        run: set -o pipefail; npm ci 2>&1 | tee -a suite.log
-
-      - name: Typecheck
-        id: typecheck
-        if: steps.install.outcome == 'success'
-        continue-on-error: true
-        run: set -o pipefail; npm run typecheck 2>&1 | tee -a suite.log
-
-      - name: Test
-        id: test
-        if: steps.install.outcome == 'success'
-        continue-on-error: true
-        run: set -o pipefail; npm test 2>&1 | tee -a suite.log
-
-      - name: Build
-        id: build
-        if: steps.install.outcome == 'success'
-        continue-on-error: true
-        run: set -o pipefail; npm run build 2>&1 | tee -a suite.log
-
-      - name: Summarize
-        id: summary
-        if: always()
-        run: |
-          RESULT="install=${{ steps.install.outcome }} typecheck=${{ steps.typecheck.outcome }} test=${{ steps.test.outcome }} build=${{ steps.build.outcome }}"
-          echo "result=$RESULT" >> $GITHUB_OUTPUT
-          { echo "### Suite"; echo '```text'; echo "$RESULT"; echo '```'; } >> $GITHUB_STEP_SUMMARY
-          # Keep the tail: the failures are at the end, and the review reads this file.
-          touch suite.log
-          tail -c 60000 suite.log > suite-log.txt
-
-      - name: Upload the suite log
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: suite-log
-          path: suite-log.txt
-          retention-days: 7
-
-  # ─────────────────────────────────────────────────────────────────
   # One review of every push (pr-review), following
   # .agents/local-skills/pr-review/references/review-contract.md.
   # A verdict of changes-required fails the job.
@@ -132,11 +56,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────────
   claude-review:
     name: Claude review
-    needs: suite
-    # !cancelled(): the review still runs when the suite job itself failed (for example a runner error); it then
-    # reports the suite as not-run.
     if: |
-      !cancelled() && (
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'pull_request' && !github.event.pull_request.draft &&
        github.event.pull_request.user.login != 'dependabot[bot]' &&
@@ -144,7 +64,7 @@ jobs:
       (github.event_name == 'issue_comment' &&
        github.event.issue.pull_request != null &&
        contains(github.event.comment.body, '@claude review this') &&
-       contains(fromJson('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)))
+       contains(fromJson('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
 
     runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
@@ -182,12 +102,6 @@ jobs:
           fetch-depth: 1
           sparse-checkout: |
             .agents/local-skills
-
-      - name: Download the suite log
-        uses: actions/download-artifact@v7
-        continue-on-error: true
-        with:
-          name: suite-log
 
       - name: Resolve PR number
         id: pr
@@ -296,10 +210,6 @@ jobs:
             The diff is in `pr-diff.txt`. Use the Read tool to read it — if it exceeds the token
             limit, read in chunks using `offset` and `limit` params until you have the full file.
             ${{ github.event_name == 'issue_comment' && 'The repository root holds the BASE branch, not the PR: the PR''s versions of the changed files are only in the diff. Read the root for the surrounding code, and take every changed line from the diff.' || 'The PR''s files are checked out at the repository root for context.' }}
-
-            Suite result (typecheck, tests and build, run on this code by the workflow's suite job; empty means
-            the suite job did not run): `${{ needs.suite.outputs.result }}`
-            If `suite-log.txt` exists, it is the tail of the suite's output: read it for any step that failed.
 
             If `previous-review.md` exists, it is this review's last report on this PR: reuse its finding IDs and
             fingerprints for problems that are still present, and list the ones now fixed under RESOLVED.
