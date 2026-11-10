@@ -3,7 +3,7 @@ import { vi } from "vitest";
 import { intentsAbi } from "../src/abi";
 
 export const USER: Address = "0x1111111111111111111111111111111111111111";
-export const ETH_INTENTS: Address = "0x2831Ea5524f171735aF8FEB2e331821bef176C8A";
+export const ETH_INTENTS: Address = "0x1252456515616DE1cFF3bc0a15CCF3b85Bf9294B";
 export const ORDER_ID: Hex = `0x${"ab".repeat(32)}`;
 export const TYPEHASH: Hex = `0x${"cd".repeat(32)}`;
 export const NOW = 1_800_000_000;

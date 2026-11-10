@@ -66,7 +66,7 @@ import { SettlerRegistry, type SettlerChain } from "./deployments";
 import { buildOrder, buildOrder9737, encodeTransferTao, type OrderSwap } from "./order-data";
 import { Order, type OrderContext, type OrderRef } from "./order";
 import { encodeSs58, parseSubstrateAddress } from "./substrate";
-import { requestQuote, type QuoterRequest } from "./quoter";
+import { requestQuote, type QuoterRequest, type QuoterResponse } from "./quoter";
 import type { SubstrateBatchResult, SubstrateCall, SubstrateSigner } from "./substrate-signer";
 import { applySlippage, resolveSwapEstimate, usdToUsdc, type SwapEstimate } from "./swap";
 import type { CallOptions, InputKind, Quote, QuoteParams, TokenInput, WalletLike } from "./types";
@@ -544,6 +544,7 @@ export class TaoIntents {
       inputKind: input.kind,
       alphaInput,
       swapRoute: response.route,
+      settler: settlerOf(response),
       inputAmount,
       inputAmountFormatted: formatUnits(inputAmount, inputToken.decimals),
       outputAmount,
@@ -613,7 +614,7 @@ export class TaoIntents {
     const swapSlippageBps = params.swapSlippageBps ?? DEFAULT_SWAP_SLIPPAGE_BPS;
     assertSlippageBps(swapSlippageBps, "swapSlippageBps");
     if (!quote.user || !quote.recipient) throw new IndicativeQuoteError();
-    const origin = await abortable(this.#settlerChain(quote.originChainId), signal);
+    const origin = await abortable(this.#settlerChain(quote.originChainId, quote.settler), signal);
     const destination = getChainConfig(this.#chains, quote.destinationChainId);
     if (this.isQuoteExpired(quote)) throw new QuoteExpiredError();
     if (params.minOutputAmount !== undefined && quote.outputAmount < params.minOutputAmount) {
@@ -1025,7 +1026,7 @@ export class TaoIntents {
     const swapSlippageBps = params.swapSlippageBps ?? DEFAULT_SWAP_SLIPPAGE_BPS;
     assertSlippageBps(swapSlippageBps, "swapSlippageBps");
     if (!quote.user || !quote.recipient) throw new IndicativeQuoteError();
-    const origin = await abortable(this.#settlerChain(quote.originChainId), signal);
+    const origin = await abortable(this.#settlerChain(quote.originChainId, quote.settler), signal);
     const destination = getChainConfig(this.#chains, quote.destinationChainId);
     if (this.isQuoteExpired(quote)) throw new QuoteExpiredError();
     if (params.minOutputAmount !== undefined && quote.outputAmount < params.minOutputAmount) {
@@ -1200,9 +1201,12 @@ export class TaoIntents {
     return client;
   }
 
-  /** A chain's config with `intents` set to the settler it runs now, and that settler's order format. */
-  async #settlerChain(chainId: number): Promise<SettlerChain> {
-    return this.#settlers.resolve(getChainConfig(this.#chains, chainId));
+  /**
+   * A chain's config with `intents` set to the settler it runs now, and that settler's order format. `quoted` is
+   * the settler a quote named, which wins over the lookup.
+   */
+  async #settlerChain(chainId: number, quoted?: Address): Promise<SettlerChain> {
+    return this.#settlers.resolveQuoted(getChainConfig(this.#chains, chainId), quoted);
   }
 
   /** The settler the Quoter names for `chain`: an indicative USDC quote out of it, to any other built-in chain. */
@@ -1219,8 +1223,7 @@ export class TaoIntents {
       },
       this.#quoter,
     );
-    const spender = response.approvalSpender;
-    return spender && isAddress(spender, { strict: false }) ? getAddress(spender) : undefined;
+    return settlerOf(response);
   }
 
   #readProtocolFee(origin: ChainConfig): Promise<number> {
@@ -1531,6 +1534,12 @@ export class TaoIntents {
 /** The resolved input of a quote, without asking the chain again. */
 function inputOfQuote(quote: Quote): ResolvedInput {
   return { kind: quote.inputKind, token: quote.inputToken, netuid: quote.alphaInput?.netuid };
+}
+
+/** The Intents contract a Quoter response names as `approvalSpender`. */
+function settlerOf(response: QuoterResponse): Address | undefined {
+  const spender = response.approvalSpender;
+  return spender && isAddress(spender, { strict: false }) ? getAddress(spender) : undefined;
 }
 
 /** The settler ABI matching the order format `origin` runs. */

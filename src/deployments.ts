@@ -66,6 +66,15 @@ export class SettlerRegistry {
     return { ...chain, intents: address, orderTypehash: this.#formatOf(chain, address) };
   }
 
+  /**
+   * `resolve`, but with the settler a quote named (its `approvalSpender`) taking the lookup's place, so an order
+   * goes where the Quoter priced it even if the lookup failed. Ignored for pinned chains or with the lookup off.
+   */
+  async resolveQuoted(chain: ChainConfig, quoted: Address | undefined): Promise<SettlerChain> {
+    if (!quoted || !this.#opts.lookup || this.#opts.pinned.has(chain.id)) return this.resolve(chain);
+    return { ...chain, intents: quoted, orderTypehash: this.#formatOf(chain, quoted) };
+  }
+
   #formatOf(chain: ChainConfig, address: Address): OrderTypehash {
     const known = this.#opts.known ?? KNOWN_SETTLERS;
     for (const typehash of Object.keys(known) as OrderTypehash[]) {

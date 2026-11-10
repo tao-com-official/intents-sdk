@@ -5,6 +5,8 @@ import { inputOrderDataParams, inputOrderData9737Params } from "../src/abi";
 import { ETH_INTENTS, jsonResponse, mockPublicClient, mockWalletClient, NOW, openLog, quoterBody, USER } from "./helpers";
 
 const NEW_SETTLER: Address = "0x3333333333333333333333333333333333333333";
+/** Ethereum's `TYPEHASH_16AE` settler, the one being migrated away from. */
+const OLD_SETTLER: Address = "0x2831Ea5524f171735aF8FEB2e331821bef176C8A";
 const REFUND_TO: Address = "0x4444444444444444444444444444444444444444";
 const QUOTE = { originChainId: 1, destinationChainId: 964, outputToken: "TAO", amount: "100", user: USER } as const;
 
@@ -13,7 +15,13 @@ function spender(address: Address | undefined, status = 200) {
   return () => jsonResponse(status === 200 ? { ...quoterBody(), approvalSpender: address } : { message: "bad request" }, status);
 }
 
-function setup(opts: { lookup?: (body: { originChainId: string }) => Response | Promise<Response>; settler?: Address; chains?: TaoIntentsOptions["chains"] } = {}) {
+function setup(opts: {
+  lookup?: (body: { originChainId: string }) => Response | Promise<Response>;
+  /** `approvalSpender` on the user's own quote. */
+  quoted?: Address;
+  settler?: Address;
+  chains?: TaoIntentsOptions["chains"];
+} = {}) {
   const origin = mockPublicClient({
     allowance: 10n ** 12n,
     logs: [openLog({ fillDeadline: NOW + 300, destinationChainId: 964, address: opts.settler ?? NEW_SETTLER })],
@@ -23,7 +31,7 @@ function setup(opts: { lookup?: (body: { originChainId: string }) => Response | 
   // The lookup is the only quote asked for without a user.
   const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
     const body = JSON.parse(init.body as string);
-    return body.userAddress === undefined ? lookup(body) : jsonResponse(quoterBody());
+    return body.userAddress === undefined ? lookup(body) : jsonResponse({ ...quoterBody(), approvalSpender: opts.quoted });
   });
   const sdk = new TaoIntents({
     fetch: fetchMock as never,
@@ -66,11 +74,11 @@ describe("settler migration", () => {
   });
 
   it("keeps the old order format on a TYPEHASH_16AE settler and refuses a different `refundTo` there", async () => {
-    const { sdk } = setup({ lookup: spender(ETH_INTENTS), settler: ETH_INTENTS });
+    const { sdk } = setup({ lookup: spender(OLD_SETTLER), settler: OLD_SETTLER });
     const wallet = mockWalletClient();
     await sdk.open({ quote: await sdk.getQuote(QUOTE), wallet: wallet as never });
     const sent = sentOrder(wallet);
-    expect(sent.address).toBe(ETH_INTENTS);
+    expect(sent.address).toBe(OLD_SETTLER);
     // The exact 13-field encoding, with no refund address appended.
     expect(encodeAbiParameters(inputOrderDataParams, decodeAbiParameters(inputOrderDataParams, sent.orderData))).toBe(sent.orderData);
 
@@ -78,11 +86,13 @@ describe("settler migration", () => {
     await expect(sdk.getQuote({ ...QUOTE, refundTo: USER })).resolves.toBeDefined();
   });
 
-  it("falls back to the configured settler when the lookup fails", async () => {
+  it("falls back to the built-in settler, in its refundTo format, when the lookup fails", async () => {
     const { sdk } = setup({ lookup: spender(undefined, 400), settler: ETH_INTENTS });
     const wallet = mockWalletClient();
     await sdk.open({ quote: await sdk.getQuote(QUOTE), wallet: wallet as never });
-    expect(sentOrder(wallet).address).toBe(ETH_INTENTS);
+    const sent = sentOrder(wallet);
+    expect(sent.address).toBe(ETH_INTENTS);
+    expect(decodeAbiParameters(inputOrderData9737Params, sent.orderData)[0].refundTo).toBe(USER);
   });
 
   it("refuses a settler it doesn't know", async () => {
@@ -133,5 +143,32 @@ describe("settler migration", () => {
     } finally {
       KNOWN_SETTLERS[TYPEHASH_9737][964]!.splice(KNOWN_SETTLERS[TYPEHASH_9737][964]!.indexOf(DEST_SETTLER), 1);
     }
+  });
+
+  describe("the settler the quote names", () => {
+    it("is where the order goes when the lookup failed", async () => {
+      const { sdk } = setup({ lookup: spender(undefined, 400), quoted: OLD_SETTLER, settler: OLD_SETTLER });
+      const wallet = mockWalletClient();
+      const quote = await sdk.getQuote(QUOTE);
+      expect(quote.settler).toBe(OLD_SETTLER);
+      await sdk.open({ quote, wallet: wallet as never });
+      const sent = sentOrder(wallet);
+      expect(sent.address).toBe(OLD_SETTLER);
+      expect(encodeAbiParameters(inputOrderDataParams, decodeAbiParameters(inputOrderDataParams, sent.orderData))).toBe(sent.orderData);
+    });
+
+    it("wins over a different lookup answer", async () => {
+      const { sdk } = setup({ lookup: spender(NEW_SETTLER), quoted: OLD_SETTLER, settler: OLD_SETTLER });
+      const wallet = mockWalletClient();
+      await sdk.open({ quote: await sdk.getQuote(QUOTE), wallet: wallet as never });
+      expect(sentOrder(wallet).address).toBe(OLD_SETTLER);
+    });
+
+    it("is ignored for a chain whose `intents` was set by hand", async () => {
+      const { sdk } = setup({ chains: { 1: { intents: NEW_SETTLER } }, quoted: OLD_SETTLER });
+      const wallet = mockWalletClient();
+      await sdk.open({ quote: await sdk.getQuote(QUOTE), wallet: wallet as never });
+      expect(sentOrder(wallet).address).toBe(NEW_SETTLER);
+    });
   });
 });
