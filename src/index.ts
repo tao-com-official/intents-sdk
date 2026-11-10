@@ -12,6 +12,9 @@ export type {
   SubstrateExecuteResult,
   RecoverRefundParams,
   RecoverStakeParams,
+  WstRedeemEstimateParams,
+  WstRedeemParams,
+  WstRedeemResult,
 } from "./client";
 
 export { Order } from "./order";
@@ -58,3 +61,5 @@ export { buildAttributionSuffix } from "./attribution";
 export * from "./errors";
 export { intentsAbi, intentsAbi9737, TYPEHASH_16AE, TYPEHASH_9737 } from "./abi";
 export type { OrderTypehash } from "./abi";
+export { tokenWeiToUnits, WST_TOKEN_WEI_PER_UNIT, wstAlphaAbi, wstAlphaRegistryAbi, wstTaoAbi } from "./wst";
+export type { WstRedeemCall, WstRedeemEstimate, WstVault } from "./wst";

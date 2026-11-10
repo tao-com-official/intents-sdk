@@ -72,6 +72,13 @@ export interface ChainConfig {
   defaultAlphaHotkey?: string;
   /** Uniswap V3 deployment for non-USDC inputs. Without it, only USDC can be paid on this chain. */
   uniswap?: UniswapConfig;
+  /** The wstTao vault. Without it, wstTao can't be redeemed on this chain. */
+  wstTao?: Address;
+  /**
+   * The `wstAlphaRegistry` contract: `vaultFor(netuid)` gives a subnet's wstAlpha vault (it doesn't index wstTao).
+   * Without it, wstAlpha can't be redeemed on this chain.
+   */
+  wstAlphaRegistry?: Address;
 }
 
 export const ETHEREUM = 1;
@@ -117,6 +124,10 @@ export const DEFAULT_CHAINS: Record<number, ChainConfig> = {
       // 3000, not 500: the 0.05% wTAO/USDC pool was drained in 2026-09 and quotes garbage on dust.
       defaultFee: 3_000,
     },
+    // Mainnet deploy of 2026-11-07, from wrapped-tao-smart-contracts `3rdParty/addresses.json` at 2d0569b (PR 34):
+    // https://github.com/tao-com-official/wrapped-tao-smart-contracts/blob/2d0569bc9374b3919206c6d8300b85bd3b74646f/3rdParty/addresses.json
+    wstTao: "0xF3007b375F37908D7A9893Cfbf5DA0603c72e2B8",
+    wstAlphaRegistry: "0xE9A3Ae35c33cA6D86B464aD5DD177911cEe46Bd3",
     tokens: [
       // On-chain symbol is `USDC.e`; we expose it as USDC like the docs do.
       { symbol: "USDC", name: "USDC.e", address: USDC_SUBTENSOR, decimals: 6, input: true },

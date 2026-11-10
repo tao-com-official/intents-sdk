@@ -336,6 +336,39 @@ The SDK sends the Quoter an `alpha_stake` destination leg and the order carries 
   (a payload can't be rebuilt locally, since the alpha floor comes from the Quoter).
 - A quote requires `user` (the order's EVM `recipient`), as with any Substrate payout.
 
+## Redeeming wstTao / wstAlpha for native TAO
+
+To exit a wst position, redeem it to native TAO on Subtensor EVM first, then quote and `open` a native `"TAO"` input
+as usual (no approval needed).
+
+```ts
+const balance = 5_000_000_000_000_000_000n; // the wst ERC-20 balance, 18-decimal token wei
+
+const estimate = await intents.estimateWstRedeem({ vault: "wstTao", amount: balance, slippageBps: 50 });
+// or a subnet's wstAlpha vault: { vault: { netuid: 64 }, ... }
+estimate.estimatedTaoOut; // native TAO wei the vault previews
+estimate.minTaoOut;       // the floor the redeem enforces
+
+const { txHash } = await intents.wstRedeem({ wallet: window.ethereum, vault: "wstTao", amount: balance });
+// or send it yourself: intents.encodeWstRedeem(estimate, receiver) -> { to, data, value: 0n }
+```
+
+- `amount` is token wei; the vault works in units (`amount / 1e9`). A remainder below one unit can't be redeemed
+  and stays in the wallet (`estimate.remainder`).
+- wstTao calls `redeem(units, receiver, minStakeToUnstake, minTaoOut)`; wstAlpha calls `redeemToTao(units, receiver,
+  minTaoOut)`, which sells the alpha for TAO. The alpha-out `redeem` of wstAlpha is not offered.
+- Both floors come from the vault's preview minus `slippageBps` (default 100 = 1%).
+- The wstAlpha vault is looked up on-chain with `wstAlphaRegistry.vaultFor(netuid)`; wstTao is the chain's
+  `wstTao` address. Both are set for Subtensor EVM mainnet (964). On a chain without them the call throws
+  `UnsupportedRouteError`; set `chains[id].wstTao` / `wstAlphaRegistry` to supply them.
+- A paused, migrating, recovering or empty vault throws `ContractRevertError` (`errorName` says which). An estimate is
+  never 0.
+- `wstRedeem` returns `{ txHash, receiver, estimate }` once the redeem is mined; `receiver` defaults to the connected
+  account. `onProgress` gets `switching-chain`, `checking-balance`, `awaiting-signature`, `submitted` and then
+  `redeem-confirmed` (`{ step: "redeem-confirmed", txHash }`), a step only this call emits.
+- Also exported: `tokenWeiToUnits(amount)` (`{ units, remainder }`), `WST_TOKEN_WEI_PER_UNIT` (`1e9`), and the ABIs
+  `wstTaoAbi`, `wstAlphaAbi` (native-TAO exit only) and `wstAlphaRegistryAbi`.
+
 ## Errors
 
 Every failure is a `TaoIntentsError` with a stable `code`; nothing is opened on-chain after a failed quote.
