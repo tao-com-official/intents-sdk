@@ -61,7 +61,7 @@ export const wstAlphaRegistryAbi = parseAbi(["function vaultFor(uint256 netuid) 
 /** Which vault to redeem from: wstTao, or the wstAlpha vault of a subnet (`netuid > 0`). */
 export type WstVault = "wstTao" | { netuid: number };
 
-export interface ResolvedWstVault {
+interface ResolvedWstVault {
   kind: "wstTao" | "wstAlpha";
   address: Address;
   /** wstAlpha only. */
@@ -95,6 +95,11 @@ export interface WstRedeemEstimate {
   slippageBps: number;
 }
 
+/** The redeem as a typed contract call (for viem's `simulateContract` / `writeContract`). */
+export type WstRedeemContractCall =
+  | { address: Address; abi: typeof wstTaoAbi; functionName: "redeem"; args: readonly [bigint, Address, bigint, bigint] }
+  | { address: Address; abi: typeof wstAlphaAbi; functionName: "redeemToTao"; args: readonly [bigint, Address, bigint] };
+
 /** A transaction ready to send: no value, from the wallet holding the wst tokens. */
 export interface WstRedeemCall {
   to: Address;
@@ -112,7 +117,7 @@ export function tokenWeiToUnits(amount: bigint): { units: bigint; remainder: big
  * Find the vault contract: the chain's `wstTao`, or for a subnet the on-chain `wstAlphaRegistry.vaultFor(netuid)`.
  * `vaultFor(0)` is never asked: root stake is wstTao, which the registry doesn't index.
  */
-export async function resolveWstVault(client: PublicClient, chain: ChainConfig, vault: WstVault): Promise<ResolvedWstVault> {
+async function resolveWstVault(client: PublicClient, chain: ChainConfig, vault: WstVault): Promise<ResolvedWstVault> {
   if (vault === "wstTao") {
     if (!chain.wstTao) throw new UnsupportedRouteError(`wstTao is not deployed on ${chain.name} (set \`chains[${chain.id}].wstTao\` to use one).`);
     return { kind: "wstTao", address: chain.wstTao };
@@ -208,26 +213,28 @@ export async function estimateWstRedeem(
   };
 }
 
-/** Calldata for the redeem an estimate describes, paying native TAO to `receiver` (a Subtensor EVM address). */
-export function encodeWstRedeem(estimate: WstRedeemEstimate, receiver: Address): WstRedeemCall {
+/** The redeem an estimate describes, paying native TAO to `receiver` (a Subtensor EVM address). */
+export function wstRedeemContractCall(estimate: WstRedeemEstimate, receiver: Address): WstRedeemContractCall {
   if (estimate.minTaoOut <= 0n) throw new InvalidParamsError("`minTaoOut` must be greater than zero.");
-  if (estimate.kind === "wstTao") {
-    if (estimate.minStakeToUnstake === undefined) throw new InvalidParamsError("A wstTao redeem needs `minStakeToUnstake`.");
-    return {
-      to: estimate.vault,
-      data: encodeFunctionData({
-        abi: wstTaoAbi,
-        functionName: "redeem",
-        args: [estimate.units, receiver, estimate.minStakeToUnstake, estimate.minTaoOut],
-      }),
-      value: 0n,
-    };
+  if (estimate.kind === "wstAlpha") {
+    return { address: estimate.vault, abi: wstAlphaAbi, functionName: "redeemToTao", args: [estimate.units, receiver, estimate.minTaoOut] };
+  }
+  if (estimate.minStakeToUnstake === undefined || estimate.minStakeToUnstake <= 0n) {
+    throw new InvalidParamsError("A wstTao redeem needs a `minStakeToUnstake` greater than zero.");
   }
   return {
-    to: estimate.vault,
-    data: encodeFunctionData({ abi: wstAlphaAbi, functionName: "redeemToTao", args: [estimate.units, receiver, estimate.minTaoOut] }),
-    value: 0n,
+    address: estimate.vault,
+    abi: wstTaoAbi,
+    functionName: "redeem",
+    args: [estimate.units, receiver, estimate.minStakeToUnstake, estimate.minTaoOut],
   };
+}
+
+/** Calldata for the redeem an estimate describes, paying native TAO to `receiver` (a Subtensor EVM address). */
+export function encodeWstRedeem(estimate: WstRedeemEstimate, receiver: Address): WstRedeemCall {
+  const call = wstRedeemContractCall(estimate, receiver);
+  const data = call.functionName === "redeem" ? encodeFunctionData(call) : encodeFunctionData(call);
+  return { to: call.address, data, value: 0n };
 }
 
 function min(a: bigint, b: bigint): bigint {

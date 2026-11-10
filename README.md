@@ -359,10 +359,15 @@ const { txHash } = await intents.wstRedeem({ wallet: window.ethereum, vault: "ws
   minTaoOut)`, which sells the alpha for TAO. The alpha-out `redeem` of wstAlpha is not offered.
 - Both floors come from the vault's preview minus `slippageBps` (default 100 = 1%).
 - The wstAlpha vault is looked up on-chain with `wstAlphaRegistry.vaultFor(netuid)`; wstTao is the chain's
-  `wstTao` address. On a chain without them the call throws `UnsupportedRouteError`; set `chains[id].wstTao` /
-  `wstAlphaRegistry` to supply them.
+  `wstTao` address. Both are set for Subtensor EVM mainnet (964). On a chain without them the call throws
+  `UnsupportedRouteError`; set `chains[id].wstTao` / `wstAlphaRegistry` to supply them.
 - A paused, migrating, recovering or empty vault throws `ContractRevertError` (`errorName` says which). An estimate is
   never 0.
+- `wstRedeem` returns `{ txHash, receiver, estimate }` once the redeem is mined; `receiver` defaults to the connected
+  account. `onProgress` gets `switching-chain`, `checking-balance`, `awaiting-signature`, `submitted` and then
+  `redeem-confirmed` (`{ step: "redeem-confirmed", txHash }`), a step only this call emits.
+- Also exported: `tokenWeiToUnits(amount)` (`{ units, remainder }`), `WST_TOKEN_WEI_PER_UNIT` (`1e9`), and the ABIs
+  `wstTaoAbi`, `wstAlphaAbi` (native-TAO exit only) and `wstAlphaRegistryAbi`.
 
 ## Errors
 

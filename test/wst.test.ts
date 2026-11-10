@@ -52,7 +52,7 @@ function mockClient(state: MockState = {}) {
         default: throw new Error(`unexpected read ${functionName}`);
       }
     }),
-    simulateContract: vi.fn(async () => {
+    simulateContract: vi.fn(async (_call: { account: Address; address: Address; functionName: string; args: readonly unknown[] }) => {
       if (s.simulateError) throw s.simulateError;
       return {};
     }),
@@ -142,6 +142,16 @@ describe("estimateWstRedeem: wstTao", () => {
     expect(call.data.slice(0, 10)).toBe(toFunctionSelector("redeem(uint256,address,uint256,uint256)"));
   });
 
+  it("refuses to encode a 0 minTaoOut or a missing minStakeToUnstake", async () => {
+    const { sdk } = setup();
+    const est = await sdk.estimateWstRedeem({ vault: "wstTao", amount: 10n ** 18n });
+    expect(() => sdk.encodeWstRedeem({ ...est, minTaoOut: 0n }, RECEIVER)).toThrow(expect.objectContaining({ code: "INVALID_PARAMS" }));
+    expect(() => sdk.encodeWstRedeem({ ...est, minStakeToUnstake: undefined }, RECEIVER)).toThrow(
+      expect.objectContaining({ code: "INVALID_PARAMS" }),
+    );
+    expect(() => sdk.encodeWstRedeem({ ...est, minStakeToUnstake: 0n }, RECEIVER)).toThrow(expect.objectContaining({ code: "INVALID_PARAMS" }));
+  });
+
   it("refuses when the chain has no wstTao", async () => {
     const client = mockClient({});
     const sdk = new TaoIntents({ publicClients: { 1: client as never } });
@@ -209,6 +219,26 @@ describe("estimateWstRedeem: wstAlpha", () => {
     expect(client.readContract).not.toHaveBeenCalled();
   });
 
+  it.each([65_536, 1.5, -1])("refuses netuid %s without reading the registry", async (netuid) => {
+    const { sdk, client } = setup();
+    await expect(sdk.estimateWstRedeem({ vault: { netuid }, amount: 10n ** 18n })).rejects.toMatchObject({ code: "INVALID_PARAMS" });
+    expect(client.readContract).not.toHaveBeenCalled();
+  });
+
+  it("refuses when the chain has no wstAlphaRegistry", async () => {
+    const client = mockClient();
+    const sdk = new TaoIntents({ publicClients: { 1: client as never } });
+    await expect(sdk.estimateWstRedeem({ chainId: 1, vault: { netuid: 64 }, amount: 10n ** 18n })).rejects.toMatchObject({
+      code: "UNSUPPORTED_ROUTE",
+    });
+    expect(client.readContract).not.toHaveBeenCalled();
+  });
+
+  it("wraps a failing registry read in an SDK error", async () => {
+    const { sdk } = setup({ readError: new BaseError("RPC unavailable") });
+    await expect(sdk.estimateWstRedeem({ vault: { netuid: 64 }, amount: 10n ** 18n })).rejects.toMatchObject({ code: "WALLET_ERROR" });
+  });
+
   it("refuses a subnet the registry has no vault for", async () => {
     const { sdk } = setup();
     await expect(sdk.estimateWstRedeem({ vault: { netuid: 12 }, amount: 10n ** 18n })).rejects.toMatchObject({ code: "UNSUPPORTED_ROUTE" });
@@ -245,6 +275,7 @@ describe("wstRedeem", () => {
     expect(sent.functionName).toBe("redeem");
     expect(sent.args).toEqual([2n * E9, USER, result.estimate.minStakeToUnstake, result.estimate.minTaoOut]);
     expect(client.simulateContract).toHaveBeenCalledTimes(1);
+    expect(client.simulateContract.mock.calls[0]![0]).toMatchObject({ account: USER, address: sent.address, functionName: sent.functionName, args: sent.args });
     expect(steps).toEqual(["switching-chain", "checking-balance", "awaiting-signature", "submitted", "redeem-confirmed"]);
   });
 
@@ -265,6 +296,19 @@ describe("wstRedeem", () => {
       code: "INSUFFICIENT_BALANCE",
     });
     expect(wallet.writeContract).not.toHaveBeenCalled();
+  });
+
+  it("only needs the whole units in the wallet, not the sub-unit remainder", async () => {
+    const { sdk } = setup({ balance: 10n ** 18n });
+    const wallet = mockWalletClient({ chainId: 964 });
+    const result = await sdk.wstRedeem({ wallet: wallet as never, vault: "wstTao", amount: 10n ** 18n + 5n });
+    expect(result.estimate.remainder).toBe(5n);
+    expect(wallet.writeContract).toHaveBeenCalledTimes(1);
+
+    const short = setup({ balance: 10n ** 18n - 1n });
+    await expect(short.sdk.wstRedeem({ wallet: mockWalletClient({ chainId: 964 }) as never, vault: "wstTao", amount: 10n ** 18n + 5n })).rejects.toMatchObject({
+      code: "INSUFFICIENT_BALANCE",
+    });
   });
 
   it("does not send when the simulation reverts", async () => {

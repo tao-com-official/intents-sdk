@@ -76,8 +76,7 @@ import {
   encodeWstRedeem,
   estimateWstRedeem,
   WST_TOKEN_WEI_PER_UNIT,
-  wstAlphaAbi,
-  wstTaoAbi,
+  wstRedeemContractCall,
   type WstRedeemCall,
   type WstRedeemEstimate,
   type WstVault,
@@ -973,36 +972,25 @@ export class TaoIntents {
       throw new InsufficientBalanceError(needed, balance, estimate.kind === "wstTao" ? "wstTAO" : `SN${estimate.netuid} wstAlpha`, 18);
     }
 
-    const call =
-      estimate.kind === "wstTao"
-        ? ({
-            address: estimate.vault,
-            abi: wstTaoAbi,
-            functionName: "redeem",
-            args: [estimate.units, receiver, estimate.minStakeToUnstake!, estimate.minTaoOut],
-          } as const)
-        : ({
-            address: estimate.vault,
-            abi: wstAlphaAbi,
-            functionName: "redeemToTao",
-            args: [estimate.units, receiver, estimate.minTaoOut],
-          } as const);
-
-    try {
-      await abortable(publicClient.simulateContract({ account: wallet.account, ...call } as never), signal);
-    } catch (error) {
-      throw normalizeError(error, "redeem the wst tokens");
-    }
-
-    onProgress?.({ step: "awaiting-signature" });
+    const call = wstRedeemContractCall(estimate, receiver);
+    const viemChain = toViemChain(chain);
     let submitted: Hash;
     try {
-      submitted = await abortable(
-        wallet.client.writeContract({ account: wallet.account, chain: toViemChain(chain), ...call } as never),
+      await abortable<unknown>(
+        call.functionName === "redeem"
+          ? publicClient.simulateContract({ account: wallet.account, ...call })
+          : publicClient.simulateContract({ account: wallet.account, ...call }),
+        signal,
+      );
+      onProgress?.({ step: "awaiting-signature" });
+      submitted = await abortable<Hash>(
+        call.functionName === "redeem"
+          ? wallet.client.writeContract({ account: wallet.account, chain: viemChain, ...call })
+          : wallet.client.writeContract({ account: wallet.account, chain: viemChain, ...call }),
         signal,
       );
     } catch (error) {
-      throw normalizeError(error, "send the redeem");
+      throw normalizeError(error, "redeem the wst tokens");
     }
     onProgress?.({ step: "submitted", txHash: submitted });
     const receipt = await this.#confirm(publicClient, submitted, "redeem", signal);
