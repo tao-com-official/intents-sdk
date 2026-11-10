@@ -1,5 +1,5 @@
 import { encodeAbiParameters, pad, zeroAddress, type Address, type Hex } from "viem";
-import { inputOrderDataParams, SUBTENSOR_OP_TRANSFER_TAO, subtensorDataParams } from "./abi";
+import { inputOrderDataParams, inputOrderData9737Params, SUBTENSOR_OP_TRANSFER_TAO, subtensorDataParams } from "./abi";
 
 const ZERO_BYTES32: Hex = `0x${"0".repeat(64)}`;
 
@@ -44,6 +44,15 @@ export interface BuildOrderInput {
   subtensorData?: Hex;
 }
 
+/** `BuildOrderInput` for a `TYPEHASH_9737` settler, which takes `refundTo`. */
+export interface BuildOrder9737Input extends BuildOrderInput {
+  /**
+   * Where `refund` pays the escrowed USDC (principal plus protocol fee) if the order is never filled. The
+   * address is part of the order id. The contract rejects the zero address and the settler itself.
+   */
+  refundTo: Address;
+}
+
 /** `TransferTao` SubtensorData: native TAO sent to a Substrate coldkey (netuid 0, no hotkey). */
 export function encodeTransferTao(recipientColdkey: Hex, amount: bigint): Hex {
   return encodeAbiParameters(subtensorDataParams, [
@@ -65,22 +74,31 @@ export function encodeTransferTao(recipientColdkey: Hex, amount: bigint): Hex {
  * only written when there is a swap.
  */
 export function buildOrder(input: BuildOrderInput) {
-  const orderData = encodeAbiParameters(inputOrderDataParams, [
-    {
-      user: input.user,
-      inputTokenToSwapFrom: input.swap?.inputTokenToSwapFrom ?? zeroAddress, // zero selects the plain USDC path
-      poolFee: input.swap?.poolFee ?? 0,
-      inputAmountToSwapFrom: input.swap?.inputAmountToSwapFrom ?? 0n,
-      swapDeadline: input.swap?.swapDeadline ?? 0,
-      inputToken: input.inputToken,
-      inputAmount: input.inputAmount,
-      outputToken: input.outputToken,
-      outputAmount: input.outputAmount,
-      destinationChainId: BigInt(input.destinationChainId),
-      recipient: pad(input.recipient, { size: 32 }), // canonical left-padded address
-      maxProtocolFeeBps: input.maxProtocolFeeBps,
-      subtensorData: input.subtensorData ?? "0x",
-    },
-  ]);
+  const orderData = encodeAbiParameters(inputOrderDataParams, [inputOrderDataFields(input)]);
   return { fillDeadline: input.fillDeadline, orderDataType: input.orderDataType, orderData };
+}
+
+/** `buildOrder` for a `TYPEHASH_9737` settler: the same order with the refund address appended. */
+export function buildOrder9737(input: BuildOrder9737Input) {
+  const orderData = encodeAbiParameters(inputOrderData9737Params, [{ ...inputOrderDataFields(input), refundTo: input.refundTo }]);
+  return { fillDeadline: input.fillDeadline, orderDataType: input.orderDataType, orderData };
+}
+
+/** The `InputOrderData` fields every settler version shares. */
+function inputOrderDataFields(input: BuildOrderInput) {
+  return {
+    user: input.user,
+    inputTokenToSwapFrom: input.swap?.inputTokenToSwapFrom ?? zeroAddress, // zero selects the plain USDC path
+    poolFee: input.swap?.poolFee ?? 0,
+    inputAmountToSwapFrom: input.swap?.inputAmountToSwapFrom ?? 0n,
+    swapDeadline: input.swap?.swapDeadline ?? 0,
+    inputToken: input.inputToken,
+    inputAmount: input.inputAmount,
+    outputToken: input.outputToken,
+    outputAmount: input.outputAmount,
+    destinationChainId: BigInt(input.destinationChainId),
+    recipient: pad(input.recipient, { size: 32 }), // canonical left-padded address
+    maxProtocolFeeBps: input.maxProtocolFeeBps,
+    subtensorData: input.subtensorData ?? "0x",
+  };
 }

@@ -40,6 +40,8 @@ export {
 } from "./config";
 export type { ChainConfig, ChainOverrides, KnownToken, TokenInfo, UniswapConfig } from "./config";
 
+export { KNOWN_SETTLERS } from "./deployments";
+
 export { parseSubstrateAddress } from "./substrate";
 export { substrateEvmAddress } from "./evm-call";
 export { polkadotSigner } from "./substrate-signer";
@@ -54,4 +56,5 @@ export type {
 } from "./substrate-signer";
 export { buildAttributionSuffix } from "./attribution";
 export * from "./errors";
-export { intentsAbi } from "./abi";
+export { intentsAbi, intentsAbi9737, TYPEHASH_16AE, TYPEHASH_9737 } from "./abi";
+export type { OrderTypehash } from "./abi";

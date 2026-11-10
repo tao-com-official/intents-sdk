@@ -283,6 +283,7 @@ export const REVERT_MESSAGES: Record<string, string> = {
   FullSettler__FillDeadlineTooFar: "The fill deadline is more than 1 day in the future.",
   FullSettler__DestinationSettlerNotSet: "The destination chain is not supported from this origin chain.",
   FullSettler__NonCanonicalRecipient: "The recipient is not a valid address.",
+  FullSettler__InvalidRefundTo: "The refund address can't be the zero address or the Intents contract itself.",
   FullSettler__ProtocolFeeExceedsMax:
     "The protocol fee changed since the quote was requested. Request a new quote.",
   FullSettler__InvalidCall: "The order was rejected by the contract (invalid swap fields or native value sent).",

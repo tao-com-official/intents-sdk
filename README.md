@@ -87,6 +87,12 @@ Pass an `AbortSignal` to `execute`, `open`, `ensureApproval` or `getQuote`. The 
 It can't close a wallet prompt that is already showing or withdraw a transaction that was already sent: if you
 abort after sending, `AbortedError.txHash` is set and `intents.getOrderByTransaction(chainId, txHash)` recovers the order.
 
+### Refund address
+
+An order no solver fills is refunded in USDC (with the protocol fee) on the origin chain. Pass `refundTo` with the
+quote to send that refund somewhere other than `user`. Only Intents contracts that support it accept another
+address; on one that doesn't, `getQuote` and `open` throw `UnsupportedRouteError`. See [Contract upgrades](#contract-upgrades).
+
 ### Fill deadline
 
 `fillDeadline` must be 60 seconds to 1 day ahead (`fillWindowSeconds` defaults to 300 and is validated the same way).
@@ -378,8 +384,17 @@ new TaoIntents({
   quoterRetries: 1,                    // transient failures only; rate limits are never auto-retried
   fillWindowSeconds: 300,              // default fill window (60s to 1 day)
   chains: { 1: { intents: "0x...", rpcUrl: "http://127.0.0.1:8545" } }, // e.g. an anvil fork
+  settlerLookup: true,                 // ask the Quoter which Intents contract each chain runs
 });
 ```
+
+### Contract upgrades
+
+The first time it needs a chain's Intents contract, the SDK asks the Quoter which one that chain runs (one indicative
+quote per chain per `TaoIntents` instance; the answer is its `approvalSpender`), and encodes orders in that
+contract's format. The SDK release ships the addresses of every contract
+version it knows (`KNOWN_SETTLERS`), so when the protocol migrates to a new contract, apps already running the SDK
+switch over by themselves. If the lookup fails, the SDK uses the chain's built-in address.
 
 ## License
 

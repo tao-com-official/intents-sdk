@@ -1,4 +1,4 @@
-import type { Hash, Hex, PublicClient } from "viem";
+import type { Address, Hash, Hex, PublicClient } from "viem";
 import { intentsAbi, ORDER_STATUS_REFUNDED, ZERO_HASH } from "./abi";
 import type { ChainConfig } from "./config";
 import { AbortedError, OrderNotFoundError, TimeoutError } from "./errors";
@@ -31,6 +31,8 @@ export interface OrderRef {
 export interface OrderContext {
   getPublicClient(chainId: number): PublicClient;
   getChainConfig(chainId: number): ChainConfig;
+  /** The Intents contract a chain runs now. */
+  getSettler(chainId: number): Promise<Address>;
   /** Current unix time in seconds. Injectable for tests. */
   now(): number;
 }
@@ -83,18 +85,20 @@ export class Order {
 
   /** One-shot status check (two RPC reads). */
   async getStatus(): Promise<OrderStatus> {
-    const origin = this.#ctx.getChainConfig(this.originChainId);
-    const destination = this.#ctx.getChainConfig(this.destinationChainId);
+    const [originSettler, destinationSettler] = await Promise.all([
+      this.#ctx.getSettler(this.originChainId),
+      this.#ctx.getSettler(this.destinationChainId),
+    ]);
 
     const [fillRecord, originStatus] = await Promise.all([
       this.#ctx.getPublicClient(this.destinationChainId).readContract({
-        address: destination.intents,
+        address: destinationSettler,
         abi: intentsAbi,
         functionName: "fillRecords",
         args: [this.orderId],
       }),
       this.#ctx.getPublicClient(this.originChainId).readContract({
-        address: origin.intents,
+        address: originSettler,
         abi: intentsAbi,
         functionName: "orderStatus",
         args: [this.orderId],

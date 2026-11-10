@@ -70,6 +70,12 @@ export interface QuoteParams {
    */
   recipient?: Address | (string & {});
   /**
+   * Where the escrowed USDC (with the protocol fee) is refunded if no solver fills the order. Defaults to `user`.
+   * Only Intents contracts that support it accept another address; the SDK throws `UnsupportedRouteError` for one
+   * that doesn't, and switches over on its own when the contract is upgraded.
+   */
+  refundTo?: Address;
+  /**
    * Unix time (seconds) by which the intent must be filled: between 60 seconds and 1 day from now.
    * Defaults to now + `fillWindowSeconds` (5 minutes unless configured otherwise). When you leave it
    * unset, `open` moves the deadline forward to a fresh window right before the wallet signs, so a user
@@ -145,6 +151,8 @@ export interface Quote {
   recipient: Address | undefined;
   /** Substrate AccountId32 (32-byte hex) when the output is paid to a coldkey instead of an EVM address. */
   substrateRecipient: Hex | undefined;
+  /** Where an unfilled order is refunded, when `QuoteParams.refundTo` was given. Otherwise `user`. */
+  refundTo?: Address;
   /** Subnet alpha output: the subnet and validator hotkey (32-byte hex) the stake goes to. `substrateRecipient` owns it. */
   alpha: { netuid: number; hotkey: Hex } | undefined;
   /** `TransferTao` / `AlphaStake` SubtensorData (from the Quoter, checked against the requested recipient). */
