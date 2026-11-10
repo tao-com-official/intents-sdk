@@ -31,6 +31,8 @@ export interface QuoterResponse {
   fees?: QuoterFees;
   /** Uniswap hop the winning solver priced for a non-USDC input. Absent for USDC or older backends. */
   route?: QuoterRoute;
+  /** The origin chain's Intents contract (FullSettler): what the input is approved to. */
+  approvalSpender?: string;
 }
 
 export interface QuoterClientOptions {

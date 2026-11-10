@@ -40,7 +40,7 @@ function setupEth(opts: { origin?: MockChainState; body?: unknown } = {}) {
   const origin = mockPublicClient({ logs: [openLog({ fillDeadline: NOW + 300, destinationChainId: 964 })], ...opts.origin });
   const dest = mockPublicClient();
   const fetchMock = vi.fn(async () => jsonResponse(opts.body ?? swapBody()));
-  const sdk = new TaoIntents({ fetch: fetchMock as never, publicClients: { 1: origin.client as never, 964: dest.client as never }, now: () => NOW });
+  const sdk = new TaoIntents({ settlerLookup: false, fetch: fetchMock as never, publicClients: { 1: origin.client as never, 964: dest.client as never }, now: () => NOW });
   return { sdk, origin, dest, fetchMock };
 }
 
@@ -52,7 +52,7 @@ function setupAlpha(opts: { origin?: MockChainState; body?: unknown } = {}) {
   });
   const dest = mockPublicClient();
   const fetchMock = vi.fn(async () => jsonResponse(opts.body ?? swapBody({ route: { poolFeeTier: 3000, amountOut: "50000000" }, outputAmount: "45000000" })));
-  const sdk = new TaoIntents({ fetch: fetchMock as never, publicClients: { 964: origin.client as never, 1: dest.client as never }, now: () => NOW });
+  const sdk = new TaoIntents({ settlerLookup: false, fetch: fetchMock as never, publicClients: { 964: origin.client as never, 1: dest.client as never }, now: () => NOW });
   return { sdk, origin, dest, fetchMock };
 }
 
@@ -241,6 +241,7 @@ describe("getQuote with a non-USDC input", () => {
   it("classifies USDC and a known ERC-20", async () => {
     expect((await setupEth().sdk.getQuote({ ...ethParams, amount: "1" })).inputKind).toBe("usdc");
     const sub = new TaoIntents({
+      settlerLookup: false,
       fetch: (async () => jsonResponse(swapBody())) as never,
       publicClients: { 1: mockPublicClient().client as never, 964: mockPublicClient().client as never },
       now: () => NOW,
@@ -267,6 +268,7 @@ describe("getQuote with a non-USDC input", () => {
   it("refuses a swap input on a chain with no Uniswap deployment", async () => {
     const origin = mockPublicClient();
     const sdk = new TaoIntents({
+      settlerLookup: false,
       fetch: (async () => jsonResponse(swapBody())) as never,
       publicClients: { 1: origin.client as never, 964: mockPublicClient().client as never },
       chains: { 1: { uniswap: undefined } },

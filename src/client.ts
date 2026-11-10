@@ -19,9 +19,10 @@ import {
 import { abortable, throwIfAborted } from "./abort";
 import { encodeAlphaStakeInput, readMirrorColdkey, readStake, readStakeAllowance, simulateUnstakeProceeds, STAKING_PRECOMPILE, stakingAbi } from "./alpha";
 import { buildAttributionSuffix } from "./attribution";
-import { intentsAbi, SUBTENSOR_OP_ALPHA_STAKE, SUBTENSOR_OP_TRANSFER_TAO, subtensorDataParams } from "./abi";
+import { intentsAbi, intentsAbi9737, TYPEHASH_16AE, TYPEHASH_9737, SUBTENSOR_OP_ALPHA_STAKE, SUBTENSOR_OP_TRANSFER_TAO, subtensorDataParams } from "./abi";
 import {
   buildChains,
+  DEFAULT_CHAINS,
   DEFAULT_QUOTER_URL,
   SUBTENSOR_EVM,
   NATIVE_TOKEN_ADDRESS,
@@ -62,10 +63,11 @@ import {
   weiToRao,
 } from "./evm-call";
 import { normalizeError } from "./normalize";
-import { buildOrder, encodeTransferTao, type OrderSwap } from "./order-data";
+import { SettlerRegistry, type SettlerChain } from "./deployments";
+import { buildOrder, buildOrder9737, encodeTransferTao, type OrderSwap } from "./order-data";
 import { Order, type OrderContext, type OrderRef } from "./order";
 import { encodeSs58, parseSubstrateAddress } from "./substrate";
-import { requestQuote, type QuoterRequest } from "./quoter";
+import { requestQuote, type QuoterRequest, type QuoterResponse } from "./quoter";
 import type { SubstrateBatchResult, SubstrateCall, SubstrateSigner } from "./substrate-signer";
 import { applySlippage, resolveSwapEstimate, usdToUsdc, type SwapEstimate } from "./swap";
 import type { CallOptions, InputKind, Quote, QuoteParams, TokenInput, WalletLike } from "./types";
@@ -86,6 +88,12 @@ export interface TaoIntentsOptions {
   quoterUrl?: string;
   /** Custom `fetch` (defaults to the global one). */
   fetch?: typeof fetch;
+  /**
+   * Ask the Quoter which FullSettler each chain runs (one indicative quote per chain, the first time the chain is
+   * used), so the SDK follows a settler migration on its own. Chains whose `intents` you set in `chains` are never
+   * looked up. Default `true`.
+   */
+  settlerLookup?: boolean;
   /** Quoter request timeout. Default 15s. */
   quoterTimeoutMs?: number;
   /** Retries for transient Quoter failures. Default 1. */
@@ -262,6 +270,8 @@ const MAX_FILL_WINDOW_SECONDS = 86_400;
 const REQUOTE_MARGIN_SECONDS = 20;
 /** Matches the minimum the TAO frontend uses. */
 const MIN_FILL_WINDOW_SECONDS = 60;
+/** USDC (6 decimals) in the indicative quote that asks which settler a chain runs: 100 USDC, which every route prices. */
+const SETTLER_LOOKUP_USDC = "100000000";
 
 function assertSlippageBps(value: number, name: string): void {
   if (!Number.isInteger(value) || value < 0 || value > 10_000) {
@@ -286,7 +296,9 @@ export class TaoIntents {
   readonly #chains: Record<number, ChainConfig>;
   readonly #quoter: { url: string; fetch: typeof fetch; timeoutMs: number; retries: number };
   readonly #clients = new Map<number, PublicClient>();
-  readonly #typehashes = new Map<number, Hex>();
+  readonly #settlers: SettlerRegistry;
+  /** By settler address: a migration brings a new type hash. */
+  readonly #typehashes = new Map<string, Hex>();
   readonly #decimals = new Map<string, number>();
   readonly #fillWindow: number;
   readonly #now: () => number;
@@ -300,6 +312,12 @@ export class TaoIntents {
       timeoutMs: options.quoterTimeoutMs ?? 15_000,
       retries: options.quoterRetries ?? 1,
     };
+    const pinned = Object.entries(options.chains ?? {}).filter(([, o]) => o.intents !== undefined).map(([id]) => Number(id));
+    this.#settlers = new SettlerRegistry({
+      lookup: options.settlerLookup === false ? undefined : (chain) => this.#lookupSettler(chain),
+      pinned: new Set(pinned),
+      now: () => this.#now(),
+    });
     this.#fillWindow = options.fillWindowSeconds ?? 300;
     if (this.#fillWindow < MIN_FILL_WINDOW_SECONDS || this.#fillWindow > MAX_FILL_WINDOW_SECONDS) {
       throw new InvalidParamsError(
@@ -311,6 +329,7 @@ export class TaoIntents {
     this.#ctx = {
       getPublicClient: (chainId) => this.#publicClient(chainId),
       getChainConfig: (chainId) => getChainConfig(this.#chains, chainId),
+      getSettler: async (chainId) => (await this.#settlerChain(chainId)).intents,
       now: this.#now,
     };
   }
@@ -334,7 +353,7 @@ export class TaoIntents {
    * Quotes expire after ~60s (`quote.validUntil`); request one when the user is about to confirm.
    */
   async getQuote(params: QuoteParams, options: Pick<CallOptions, "signal"> = {}): Promise<Quote> {
-    const origin = getChainConfig(this.#chains, params.originChainId);
+    const origin = await abortable(this.#settlerChain(params.originChainId), options.signal);
     const destination = getChainConfig(this.#chains, params.destinationChainId);
     if (origin.id === destination.id) {
       throw new UnsupportedRouteError("The origin and destination chains must be different.");
@@ -455,6 +474,10 @@ export class TaoIntents {
     // A Substrate payout still names an EVM address in the order's `recipient`; the coldkey rides in `subtensorData`.
     // That makes the user's EVM address mandatory for alpha, which can only be requested for a signer.
     const recipient = substrateRecipient || !params.recipient ? user : parseAddress(params.recipient, "recipient");
+    const refundTo = params.refundTo === undefined ? undefined : parseAddress(params.refundTo, "refundTo");
+    if (refundTo === zeroAddress) throw new InvalidParamsError("`refundTo` can't be the zero address.");
+    // Checked again in `open`, against the settler live then.
+    refundAddress(origin, { refundTo, user });
 
     const now = this.#now();
     const fillDeadline = params.fillDeadline ?? now + this.#fillWindow;
@@ -560,6 +583,7 @@ export class TaoIntents {
       inputKind: input.kind,
       alphaInput,
       swapRoute: response.route,
+      settler: settlerOf(response),
       inputAmount,
       inputAmountFormatted: formatUnits(inputAmount, inputToken.decimals),
       outputAmount,
@@ -570,6 +594,7 @@ export class TaoIntents {
       substrateAccount,
       recipient,
       substrateRecipient,
+      refundTo,
       alpha: alpha && { netuid: alpha.netuid, hotkey: alpha.hotkey },
       subtensorData,
       fillDeadline,
@@ -599,7 +624,7 @@ export class TaoIntents {
   async ensureApproval(params: EnsureApprovalParams): Promise<{ approvalTxHash?: Hash }> {
     const { signal, onProgress } = params;
     throwIfAborted(signal);
-    const origin = getChainConfig(this.#chains, params.originChainId);
+    const origin = await abortable(this.#settlerChain(params.originChainId), signal);
     const input = await abortable(this.#resolveInput(origin, params.inputToken), signal);
     const amount = parseInputAmount(params, input.token);
     const wallet = await abortable(connectWallet(params.wallet), signal);
@@ -628,7 +653,7 @@ export class TaoIntents {
     const swapSlippageBps = params.swapSlippageBps ?? DEFAULT_SWAP_SLIPPAGE_BPS;
     assertSlippageBps(swapSlippageBps, "swapSlippageBps");
     if (!quote.user || !quote.recipient) throw new IndicativeQuoteError();
-    const origin = getChainConfig(this.#chains, quote.originChainId);
+    const origin = await abortable(this.#settlerChain(quote.originChainId, quote.settler), signal);
     const destination = getChainConfig(this.#chains, quote.destinationChainId);
     if (this.isQuoteExpired(quote)) throw new QuoteExpiredError();
     if (params.minOutputAmount !== undefined && quote.outputAmount < params.minOutputAmount) {
@@ -671,7 +696,7 @@ export class TaoIntents {
         publicClient.simulateContract({
           account: wallet.account,
           address: origin.intents,
-          abi: intentsAbi,
+          abi: settlerAbi(origin),
           functionName: "open",
           args: [order],
           ...(value > 0n && { value }),
@@ -692,7 +717,7 @@ export class TaoIntents {
           account: wallet.account,
           chain: toViemChain(origin),
           address: origin.intents,
-          abi: intentsAbi,
+          abi: settlerAbi(origin),
           functionName: "open",
           args: [order],
           ...(value > 0n && { value }),
@@ -753,7 +778,7 @@ export class TaoIntents {
     assertSlippageBps(swapSlippageBps, "swapSlippageBps");
     if (partnerId !== undefined) buildAttributionSuffix(partnerId); // fail before any approval
     throwIfAborted(signal);
-    const origin = getChainConfig(this.#chains, quoteParams.originChainId);
+    const origin = await abortable(this.#settlerChain(quoteParams.originChainId), signal);
     const destination = getChainConfig(this.#chains, quoteParams.destinationChainId);
     const input = await abortable(this.#resolveInput(origin, quoteParams.inputToken), signal);
     const amount = parseInputAmount(quoteParams, input.token);
@@ -996,7 +1021,7 @@ export class TaoIntents {
 
   /** Recover an `Order` from the hash of its opening transaction (if you only stored that). */
   async getOrderByTransaction(originChainId: number, txHash: Hash): Promise<Order> {
-    const origin = getChainConfig(this.#chains, originChainId);
+    const origin = await this.#settlerChain(originChainId);
     const receipt = await this.#publicClient(origin.id)
       .getTransactionReceipt({ hash: txHash })
       .catch(() => {
@@ -1077,7 +1102,7 @@ export class TaoIntents {
 
   /** The order for a quote: its swap fields, fee cap and type hash, with a fill deadline fresh enough to sign. */
   async #assembleOrder(args: {
-    origin: ChainConfig;
+    origin: SettlerChain;
     destination: ChainConfig;
     quote: Quote;
     swap: SwapPlan | undefined;
@@ -1091,6 +1116,11 @@ export class TaoIntents {
     const { origin, destination, quote, swap, signal, as } = args;
     const maxProtocolFeeBps = quote.protocolFeeBps ?? (await abortable(this.#readProtocolFee(origin), signal));
     const orderDataType = await abortable(this.#getTypehash(origin), signal);
+    if (orderDataType.toLowerCase() !== origin.orderTypehash) {
+      throw new UnsupportedRouteError(
+        `The Intents contract on ${origin.name} (${origin.intents}) uses order type ${orderDataType}, not the ${origin.orderTypehash} this SDK expects for it.`,
+      );
+    }
 
     // As late as possible: this is the deadline the user signs.
     const now = this.#now();
@@ -1104,8 +1134,9 @@ export class TaoIntents {
       as?.nativeProceedsWei !== undefined
         ? { inputTokenToSwapFrom: NATIVE_TOKEN_ADDRESS, inputAmountToSwapFrom: as.nativeProceedsWei, poolFee: swap!.estimate.poolFee, swapDeadline: fillDeadline }
         : swap && buildOrderSwap(quote, swap, fillDeadline);
-    const order = buildOrder({
-      user: as?.user ?? quote.user!,
+    const user = as?.user ?? quote.user!;
+    const fields = {
+      user,
       inputToken: origin.usdc,
       inputAmount: swap ? swap.estimate.minUsdc : quote.inputAmount,
       swap: orderSwap,
@@ -1117,7 +1148,9 @@ export class TaoIntents {
       maxProtocolFeeBps,
       fillDeadline,
       orderDataType,
-    });
+    };
+    const refundTo = refundAddress(origin, quote);
+    const order = origin.orderTypehash === TYPEHASH_9737 ? buildOrder9737({ ...fields, refundTo: refundTo ?? user }) : buildOrder(fields);
     // A native input is the transaction's value: the settler wraps it before swapping.
     const value = as?.nativeProceedsWei ?? (quote.inputKind === "native" ? quote.inputAmount : 0n);
     return { order, value, fillDeadline };
@@ -1130,7 +1163,7 @@ export class TaoIntents {
     const swapSlippageBps = params.swapSlippageBps ?? DEFAULT_SWAP_SLIPPAGE_BPS;
     assertSlippageBps(swapSlippageBps, "swapSlippageBps");
     if (!quote.user || !quote.recipient) throw new IndicativeQuoteError();
-    const origin = getChainConfig(this.#chains, quote.originChainId);
+    const origin = await abortable(this.#settlerChain(quote.originChainId, quote.settler), signal);
     const destination = getChainConfig(this.#chains, quote.destinationChainId);
     if (this.isQuoteExpired(quote)) throw new QuoteExpiredError();
     if (params.minOutputAmount !== undefined && quote.outputAmount < params.minOutputAmount) {
@@ -1184,7 +1217,7 @@ export class TaoIntents {
           client.simulateContract({
             account: wrapped,
             address: origin.intents,
-            abi: intentsAbi,
+            abi: settlerAbi(origin),
             functionName: "open",
             args: [sim.order],
             ...(sim.value > 0n && { value: sim.value }),
@@ -1203,7 +1236,7 @@ export class TaoIntents {
       source,
       mirror,
       settler: origin.intents,
-      openCalldata: encodeFunctionData({ abi: intentsAbi, functionName: "open", args: [order] }),
+      openCalldata: encodeFunctionData({ abi: settlerAbi(origin), functionName: "open", args: [order] }),
       dataSuffix,
       valueWei: value,
       gasPriceWei,
@@ -1305,6 +1338,31 @@ export class TaoIntents {
     return client;
   }
 
+  /**
+   * A chain's config with `intents` set to the settler it runs now, and that settler's order format. `quoted` is
+   * the settler a quote named, which wins over the lookup.
+   */
+  async #settlerChain(chainId: number, quoted?: Address): Promise<SettlerChain> {
+    return this.#settlers.resolveQuoted(getChainConfig(this.#chains, chainId), quoted);
+  }
+
+  /** The settler the Quoter names for `chain`: an indicative USDC quote out of it, to any other built-in chain. */
+  async #lookupSettler(chain: ChainConfig): Promise<Address | undefined> {
+    const other = Object.values(this.#chains).find((c) => c.id !== chain.id && DEFAULT_CHAINS[c.id]);
+    if (!other) return undefined;
+    const response = await requestQuote(
+      {
+        originChainId: String(chain.id),
+        destinationChainId: String(other.id),
+        inputTokenAddress: chain.usdc,
+        outputTokenAddress: other.usdc,
+        inputAmount: SETTLER_LOOKUP_USDC,
+      },
+      this.#quoter,
+    );
+    return settlerOf(response);
+  }
+
   #readProtocolFee(origin: ChainConfig): Promise<number> {
     return this.#publicClient(origin.id).readContract({
       address: origin.intents,
@@ -1315,14 +1373,15 @@ export class TaoIntents {
 
   async #getTypehash(origin: ChainConfig): Promise<Hex> {
     // Read from the contract rather than hardcoding: it changes when the order format does.
-    const cached = this.#typehashes.get(origin.id);
+    const key = `${origin.id}:${origin.intents.toLowerCase()}`;
+    const cached = this.#typehashes.get(key);
     if (cached) return cached;
     const typehash = await this.#publicClient(origin.id).readContract({
       address: origin.intents,
       abi: intentsAbi,
       functionName: "ONCHAIN_ORDER_DATA_TYPEHASH",
     });
-    this.#typehashes.set(origin.id, typehash);
+    this.#typehashes.set(key, typehash);
     return typehash;
   }
 
@@ -1612,6 +1671,35 @@ export class TaoIntents {
 /** The resolved input of a quote, without asking the chain again. */
 function inputOfQuote(quote: Quote): ResolvedInput {
   return { kind: quote.inputKind, token: quote.inputToken, netuid: quote.alphaInput?.netuid };
+}
+
+/** The Intents contract a Quoter response names as `approvalSpender`. */
+function settlerOf(response: QuoterResponse): Address | undefined {
+  const spender = response.approvalSpender;
+  return spender && isAddress(spender, { strict: false }) ? getAddress(spender) : undefined;
+}
+
+/** The settler ABI matching the order format `origin` runs. */
+function settlerAbi(origin: SettlerChain) {
+  return origin.orderTypehash === TYPEHASH_9737 ? intentsAbi9737 : intentsAbi;
+}
+
+/**
+ * The quote's `refundTo`, checked against the settler: it can't be the settler itself, and a `TYPEHASH_16AE`
+ * settler only refunds `user`.
+ */
+function refundAddress(origin: SettlerChain, quote: Pick<Quote, "refundTo" | "user">): Address | undefined {
+  const { refundTo } = quote;
+  if (refundTo === undefined) return undefined;
+  if (refundTo.toLowerCase() === origin.intents.toLowerCase()) {
+    throw new InvalidParamsError("`refundTo` can't be the Intents contract itself.");
+  }
+  if (origin.orderTypehash === TYPEHASH_16AE && refundTo.toLowerCase() !== quote.user?.toLowerCase()) {
+    throw new UnsupportedRouteError(
+      `The Intents contract on ${origin.name} refunds unfilled orders to the user only; it doesn't support \`refundTo\` yet.`,
+    );
+  }
+  return refundTo;
 }
 
 /** The order's swap fields for a non-USDC input; see `OrderSwap`. */

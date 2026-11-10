@@ -16,6 +16,7 @@ function setup(opts: { origin?: Parameters<typeof mockPublicClient>[0]; fetchImp
   const dest = mockPublicClient();
   const fetchMock = vi.fn((opts.fetchImpl as never) ?? (async () => jsonResponse(quoterBody())));
   const sdk = new TaoIntents({
+    settlerLookup: false,
     fetch: fetchMock as never,
     publicClients: { 1: origin.client as never, 964: dest.client as never },
     now: opts.now ?? (() => NOW),
