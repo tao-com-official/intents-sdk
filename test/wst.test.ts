@@ -80,6 +80,13 @@ describe("tokenWeiToUnits", () => {
 });
 
 describe("chain wst addresses", () => {
+  it("default to the mainnet deploy on 964", () => {
+    expect(buildChains()[964]).toMatchObject({
+      wstTao: "0xF3007b375F37908D7A9893Cfbf5DA0603c72e2B8",
+      wstAlphaRegistry: "0xE9A3Ae35c33cA6D86B464aD5DD177911cEe46Bd3",
+    });
+  });
+
   it("are chain config constants a caller can override", () => {
     expect(buildChains({ 964: { wstTao: WST_TAO, wstAlphaRegistry: REGISTRY } })[964]).toMatchObject({ wstTao: WST_TAO, wstAlphaRegistry: REGISTRY });
   });
@@ -136,8 +143,9 @@ describe("estimateWstRedeem: wstTao", () => {
   });
 
   it("refuses when the chain has no wstTao", async () => {
-    const { sdk, client } = setup({}, {});
-    await expect(sdk.estimateWstRedeem({ vault: "wstTao", amount: 10n ** 18n })).rejects.toMatchObject({ code: "UNSUPPORTED_ROUTE" });
+    const client = mockClient({});
+    const sdk = new TaoIntents({ publicClients: { 1: client as never } });
+    await expect(sdk.estimateWstRedeem({ chainId: 1, vault: "wstTao", amount: 10n ** 18n })).rejects.toMatchObject({ code: "UNSUPPORTED_ROUTE" });
     expect(client.readContract).not.toHaveBeenCalled();
   });
 

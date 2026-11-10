@@ -115,7 +115,9 @@ export const DEFAULT_CHAINS: Record<number, ChainConfig> = {
       // 3000, not 500: the 0.05% wTAO/USDC pool was drained in 2026-09 and quotes garbage on dust.
       defaultFee: 3_000,
     },
-    // wstTao and wstAlphaRegistry: not deployed on mainnet yet. Set them here once they are (`chains[964]` overrides meanwhile).
+    // Mainnet deploy of 2026-11-07 (wrapped-tao-smart-contracts `3rdParty/addresses.json`).
+    wstTao: "0xF3007b375F37908D7A9893Cfbf5DA0603c72e2B8",
+    wstAlphaRegistry: "0xE9A3Ae35c33cA6D86B464aD5DD177911cEe46Bd3",
     tokens: [
       // On-chain symbol is `USDC.e`; we expose it as USDC like the docs do.
       { symbol: "USDC", name: "USDC.e", address: USDC_SUBTENSOR, decimals: 6, input: true },
