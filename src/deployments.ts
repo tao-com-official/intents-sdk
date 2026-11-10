@@ -14,9 +14,8 @@ export const KNOWN_SETTLERS: Record<OrderTypehash, Record<number, Address[]>> = 
     964: ["0x24834012973b6e70997a23C7aAB01481d46CB8E1"],
   },
   [TYPEHASH_9737]: {
-    // TODO: add the refundTo settlers once they are deployed.
-    1: [],
-    964: [],
+    1: ["0x1252456515616DE1cFF3bc0a15CCF3b85Bf9294B"],
+    964: ["0x2D3f088b124364C0002748dB5D0A30e82512efea"],
   },
 };
 
