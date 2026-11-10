@@ -153,6 +153,8 @@ export interface Quote {
   substrateRecipient: Hex | undefined;
   /** Where an unfilled order is refunded, when `QuoteParams.refundTo` was given. Otherwise `user`. */
   refundTo?: Address;
+  /** The Intents contract the Quoter priced this quote for (its `approvalSpender`). `open` sends the order there. */
+  settler?: Address;
   /** Subnet alpha output: the subnet and validator hotkey (32-byte hex) the stake goes to. `substrateRecipient` owns it. */
   alpha: { netuid: number; hotkey: Hex } | undefined;
   /** `TransferTao` / `AlphaStake` SubtensorData (from the Quoter, checked against the requested recipient). */

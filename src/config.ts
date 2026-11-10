@@ -87,7 +87,7 @@ export const DEFAULT_CHAINS: Record<number, ChainConfig> = {
     name: "Ethereum",
     nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
     explorerUrl: "https://etherscan.io",
-    intents: "0x2831Ea5524f171735aF8FEB2e331821bef176C8A",
+    intents: "0x1252456515616DE1cFF3bc0a15CCF3b85Bf9294B",
     usdc: USDC_ETH,
     uniswap: {
       quoterV2: "0x61fFE014bA17989E743c5F6cB21bF9697530B21e",
@@ -105,7 +105,7 @@ export const DEFAULT_CHAINS: Record<number, ChainConfig> = {
     nativeCurrency: { name: "TAO", symbol: "TAO", decimals: 18 },
     rpcUrl: "https://lite.chain.opentensor.ai",
     explorerUrl: "https://evm.taostats.io",
-    intents: "0x24834012973b6e70997a23C7aAB01481d46CB8E1",
+    intents: "0x2D3f088b124364C0002748dB5D0A30e82512efea",
     usdc: USDC_SUBTENSOR,
     substrateRecipients: true,
     substrateEvmCall: true,
