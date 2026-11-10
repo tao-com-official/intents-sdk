@@ -1,12 +1,15 @@
-import { decodeAbiParameters, encodeAbiParameters, type Address } from "viem";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { KNOWN_SETTLERS, TaoIntents, TYPEHASH_9737, type TaoIntentsOptions } from "../src";
+import { decodeAbiParameters, encodeAbiParameters, zeroAddress, type Address } from "viem";
+import { describe, expect, it, vi } from "vitest";
+import { KNOWN_SETTLERS, TaoIntents, TYPEHASH_16AE, TYPEHASH_9737, type TaoIntentsOptions } from "../src";
 import { inputOrderDataParams, inputOrderData9737Params } from "../src/abi";
 import { ETH_INTENTS, jsonResponse, mockPublicClient, mockWalletClient, NOW, openLog, quoterBody, USER } from "./helpers";
 
-const NEW_SETTLER: Address = "0x3333333333333333333333333333333333333333";
+/** Ethereum's `TYPEHASH_9737` settler, the built-in default. */
+const NEW_SETTLER: Address = ETH_INTENTS;
 /** Ethereum's `TYPEHASH_16AE` settler, the one being migrated away from. */
 const OLD_SETTLER: Address = "0x2831Ea5524f171735aF8FEB2e331821bef176C8A";
+/** Subtensor EVM's `TYPEHASH_16AE` settler. */
+const OLD_SETTLER_964: Address = "0x24834012973b6e70997a23C7aAB01481d46CB8E1";
 const REFUND_TO: Address = "0x4444444444444444444444444444444444444444";
 const QUOTE = { originChainId: 1, destinationChainId: 964, outputToken: "TAO", amount: "100", user: USER } as const;
 
@@ -21,6 +24,7 @@ function setup(opts: {
   quoted?: Address;
   settler?: Address;
   chains?: TaoIntentsOptions["chains"];
+  now?: () => number;
 } = {}) {
   const origin = mockPublicClient({
     allowance: 10n ** 12n,
@@ -37,7 +41,7 @@ function setup(opts: {
     fetch: fetchMock as never,
     publicClients: { 1: origin.client as never, 964: dest.client as never },
     chains: opts.chains,
-    now: () => NOW,
+    now: opts.now ?? (() => NOW),
   });
   return { sdk, origin, dest, lookup };
 }
@@ -46,9 +50,6 @@ function sentOrder(wallet: ReturnType<typeof mockWalletClient>) {
   const call = wallet.writeContract.mock.calls.map(([a]) => a as { functionName: string; address: Address; args: [{ orderData: `0x${string}` }] }).find((a) => a.functionName === "open")!;
   return { address: call.address, orderData: call.args[0].orderData };
 }
-
-beforeEach(() => KNOWN_SETTLERS[TYPEHASH_9737][1]!.push(NEW_SETTLER));
-afterEach(() => KNOWN_SETTLERS[TYPEHASH_9737][1]!.splice(KNOWN_SETTLERS[TYPEHASH_9737][1]!.indexOf(NEW_SETTLER), 1));
 
 describe("settler migration", () => {
   it("opens on the settler the Quoter names, refunding the user by default", async () => {
@@ -108,11 +109,11 @@ describe("settler migration", () => {
   });
 
   it("skips the lookup for a chain whose `intents` was set by hand", async () => {
-    const { sdk, lookup } = setup({ chains: { 1: { intents: NEW_SETTLER } } });
+    const { sdk, lookup } = setup({ chains: { 1: { intents: OLD_SETTLER } }, settler: OLD_SETTLER });
     const wallet = mockWalletClient();
     await sdk.open({ quote: await sdk.getQuote(QUOTE), wallet: wallet as never });
     expect(lookup).not.toHaveBeenCalled();
-    expect(sentOrder(wallet).address).toBe(NEW_SETTLER);
+    expect(sentOrder(wallet).address).toBe(OLD_SETTLER);
   });
 
   it("encodes for a hand-set settler with `orderTypehash`", async () => {
@@ -125,24 +126,64 @@ describe("settler migration", () => {
   });
 
   it("tracks an order on the settlers the Quoter names for both chains", async () => {
-    const DEST_SETTLER: Address = "0x6666666666666666666666666666666666666666";
-    KNOWN_SETTLERS[TYPEHASH_9737][964]!.push(DEST_SETTLER);
-    try {
-      const { sdk, origin, dest, lookup } = setup({
-        lookup: ({ originChainId }) => spender(originChainId === "964" ? DEST_SETTLER : NEW_SETTLER)(),
-      });
-      const order = sdk.getOrder({ orderId: `0x${"ab".repeat(32)}`, originChainId: 1, destinationChainId: 964, fillDeadline: NOW + 300 });
-      await order.getStatus();
-      await order.getStatus();
+    const { sdk, origin, dest, lookup } = setup({
+      lookup: ({ originChainId }) => spender(originChainId === "964" ? OLD_SETTLER_964 : OLD_SETTLER)(),
+    });
+    const order = sdk.getOrder({ orderId: `0x${"ab".repeat(32)}`, originChainId: 1, destinationChainId: 964, fillDeadline: NOW + 300 });
+    await order.getStatus();
+    await order.getStatus();
 
-      const readAt = (client: typeof origin.client, fn: string) =>
-        client.readContract.mock.calls.map(([a]) => a as { functionName: string; address: Address }).find((a) => a.functionName === fn)!.address;
-      expect(readAt(origin.client, "orderStatus")).toBe(NEW_SETTLER);
-      expect(readAt(dest.client, "fillRecords")).toBe(DEST_SETTLER);
-      expect(lookup).toHaveBeenCalledTimes(2); // one per chain, not per status check
-    } finally {
-      KNOWN_SETTLERS[TYPEHASH_9737][964]!.splice(KNOWN_SETTLERS[TYPEHASH_9737][964]!.indexOf(DEST_SETTLER), 1);
-    }
+    const readAt = (client: typeof origin.client, fn: string) =>
+      client.readContract.mock.calls.map(([a]) => a as { functionName: string; address: Address }).find((a) => a.functionName === fn)!.address;
+    expect(readAt(origin.client, "orderStatus")).toBe(OLD_SETTLER);
+    expect(readAt(dest.client, "fillRecords")).toBe(OLD_SETTLER_964);
+    expect(lookup).toHaveBeenCalledTimes(2); // one per chain, not per status check
+  });
+
+  it("asks again after a failed lookup only once the retry delay has passed", async () => {
+    let now = NOW;
+    const { sdk, lookup } = setup({ lookup: spender(undefined, 400), now: () => now });
+    await sdk.getQuote(QUOTE);
+    await sdk.getQuote(QUOTE);
+    expect(lookup).toHaveBeenCalledOnce();
+    now += 9;
+    await sdk.getQuote(QUOTE);
+    expect(lookup).toHaveBeenCalledOnce();
+    now += 1;
+    await sdk.getQuote(QUOTE);
+    expect(lookup).toHaveBeenCalledTimes(2);
+  });
+
+  it("refuses an unlisted Quoter-named settler even with `orderTypehash` set", async () => {
+    const unknown: Address = "0x7777777777777777777777777777777777777777";
+    const chains = { 1: { orderTypehash: TYPEHASH_9737 } } as const;
+    await expect(setup({ lookup: spender(unknown), chains }).sdk.getQuote(QUOTE)).rejects.toMatchObject({ code: "UNSUPPORTED_ROUTE" });
+
+    const { sdk } = setup({ lookup: spender(undefined, 400), quoted: unknown, chains });
+    const quote = await sdk.getQuote(QUOTE);
+    const wallet = mockWalletClient();
+    await expect(sdk.open({ quote, wallet: wallet as never })).rejects.toMatchObject({ code: "UNSUPPORTED_ROUTE" });
+    expect(wallet.writeContract).not.toHaveBeenCalled();
+  });
+
+  it("refuses a hand-set settler whose on-chain order type isn't the configured one", async () => {
+    const custom: Address = "0x5555555555555555555555555555555555555555";
+    const { sdk } = setup({ chains: { 1: { intents: custom, orderTypehash: TYPEHASH_16AE } }, settler: custom });
+    const wallet = mockWalletClient();
+    // The mock settler reports TYPEHASH_9737.
+    await expect(sdk.open({ quote: await sdk.getQuote(QUOTE), wallet: wallet as never })).rejects.toMatchObject({ code: "UNSUPPORTED_ROUTE" });
+    expect(wallet.writeContract.mock.calls.some(([a]) => (a as { functionName: string }).functionName === "open")).toBe(false);
+  });
+
+  it("refuses `refundTo` set to the zero address or to the settler itself", async () => {
+    const { sdk } = setup();
+    await expect(sdk.getQuote({ ...QUOTE, refundTo: zeroAddress })).rejects.toMatchObject({ code: "INVALID_PARAMS" });
+    await expect(sdk.getQuote({ ...QUOTE, refundTo: NEW_SETTLER })).rejects.toMatchObject({ code: "INVALID_PARAMS" });
+  });
+
+  it("can't have its settler list changed", () => {
+    expect(() => (KNOWN_SETTLERS[TYPEHASH_9737][1] as Address[]).push(OLD_SETTLER)).toThrow(TypeError);
+    expect(Object.isFrozen(KNOWN_SETTLERS[TYPEHASH_9737])).toBe(true);
   });
 
   describe("the settler the quote names", () => {

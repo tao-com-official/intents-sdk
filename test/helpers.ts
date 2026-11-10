@@ -1,12 +1,21 @@
 import { encodeAbiParameters, encodeEventTopics, getAbiItem, type Address, type Hex } from "viem";
 import { vi } from "vitest";
-import { intentsAbi } from "../src/abi";
+import { intentsAbi, TYPEHASH_9737, type OrderTypehash } from "../src/abi";
+import { KNOWN_SETTLERS } from "../src/deployments";
 
 export const USER: Address = "0x1111111111111111111111111111111111111111";
 export const ETH_INTENTS: Address = "0x1252456515616DE1cFF3bc0a15CCF3b85Bf9294B";
 export const ORDER_ID: Hex = `0x${"ab".repeat(32)}`;
 export const TYPEHASH: Hex = `0x${"cd".repeat(32)}`;
 export const NOW = 1_800_000_000;
+
+/** The `ONCHAIN_ORDER_DATA_TYPEHASH` a settler reports: its listed format, else `TYPEHASH_9737` (a hand-set settler). */
+function typehashAt(address: string | undefined): OrderTypehash {
+  const listed = (Object.keys(KNOWN_SETTLERS) as OrderTypehash[]).find((t) =>
+    Object.values(KNOWN_SETTLERS[t]).flat().some((a) => a.toLowerCase() === address?.toLowerCase()),
+  );
+  return listed ?? TYPEHASH_9737;
+}
 
 export function quoterBody(outputAmount = "320584403022379535", validUntil = NOW + 60) {
   return {
@@ -99,7 +108,7 @@ export function mockPublicClient(state: MockChainState = {}) {
     readContract: vi.fn(async ({ functionName, address }: { functionName: string; address?: string }) => {
       switch (functionName) {
         case "protocolFeeBps": return s.protocolFeeBps;
-        case "ONCHAIN_ORDER_DATA_TYPEHASH": return TYPEHASH;
+        case "ONCHAIN_ORDER_DATA_TYPEHASH": return typehashAt(address);
         case "balanceOf": return s.balance;
         case "allowance": return address === STAKING ? s.stakeAllowance : s.allowance;
         case "decimals":
