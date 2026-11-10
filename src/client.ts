@@ -234,6 +234,8 @@ const MAX_FILL_WINDOW_SECONDS = 86_400;
 const REQUOTE_MARGIN_SECONDS = 20;
 /** Matches the minimum the TAO frontend uses. */
 const MIN_FILL_WINDOW_SECONDS = 60;
+/** USDC (6 decimals) in the indicative quote that asks which settler a chain runs: 100 USDC, which every route prices. */
+const SETTLER_LOOKUP_USDC = "100000000";
 
 function assertSlippageBps(value: number, name: string): void {
   if (!Number.isInteger(value) || value < 0 || value > 10_000) {
@@ -278,6 +280,7 @@ export class TaoIntents {
     this.#settlers = new SettlerRegistry({
       lookup: options.settlerLookup === false ? undefined : (chain) => this.#lookupSettler(chain),
       pinned: new Set(pinned),
+      now: () => this.#now(),
     });
     this.#fillWindow = options.fillWindowSeconds ?? 300;
     if (this.#fillWindow < MIN_FILL_WINDOW_SECONDS || this.#fillWindow > MAX_FILL_WINDOW_SECONDS) {
@@ -984,6 +987,11 @@ export class TaoIntents {
     const { origin, destination, quote, swap, signal, as } = args;
     const maxProtocolFeeBps = quote.protocolFeeBps ?? (await abortable(this.#readProtocolFee(origin), signal));
     const orderDataType = await abortable(this.#getTypehash(origin), signal);
+    if (orderDataType.toLowerCase() !== origin.orderTypehash) {
+      throw new UnsupportedRouteError(
+        `The Intents contract on ${origin.name} (${origin.intents}) uses order type ${orderDataType}, not the ${origin.orderTypehash} this SDK expects for it.`,
+      );
+    }
 
     // As late as possible: this is the deadline the user signs.
     const now = this.#now();
@@ -1219,7 +1227,7 @@ export class TaoIntents {
         destinationChainId: String(other.id),
         inputTokenAddress: chain.usdc,
         outputTokenAddress: other.usdc,
-        inputAmount: "100000000",
+        inputAmount: SETTLER_LOOKUP_USDC,
       },
       this.#quoter,
     );
