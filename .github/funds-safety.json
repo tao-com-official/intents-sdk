@@ -1,0 +1,6 @@
+{
+  "approvers": ["tensorajack", "rflitcroft-tensora", "loayei97"],
+  "address_files": ["src/deployments.ts", "src/config.ts", "src/alpha.ts"],
+  "address_report_only": [".gitleaks.toml", "test/**"],
+  "allowed_hosts": ["tao.com", "*.tao.com", "localhost"]
+}
