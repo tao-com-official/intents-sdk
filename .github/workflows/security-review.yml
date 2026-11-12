@@ -1,0 +1,38 @@
+# The AI security review, from the security-only public export of tao-com-official/ci-workflows
+# (tao-com-official/ci-workflows-public). The check is `security-review / review`. It reads this repo's
+# rules from .github/security-review.md on the base branch. This repo has no AI code review or risk
+# gate: the security review runs standalone.
+#
+# A fork's PR, and any run without CLAUDE_CODE_OAUTH_TOKEN (a Dependabot PR), fail the check with
+# the reason instead of skipping it: a maintainer reads the diff, pushes the branch into this repo
+# and opens a PR from it.
+#
+# PLACEHOLDER: replace PUBLIC_EXPORT_SHA with the ci-workflows-public commit that has the exported
+# workflows (its first export PR's merge commit). Until then this workflow can't run.
+name: security-review
+
+on:
+  pull_request:
+    # No issue_comment: a comment run checks out the PR's head with secrets, and reports on main's
+    # SHA, so it can't satisfy the required check. Re-run the job instead.
+    types: [opened, synchronize, reopened, ready_for_review]
+  # For the merge queue once it's on; the called job passes straight through there.
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  security-review:
+    permissions:
+      contents: write # only its job that resolves fixed threads; GraphQL needs it
+      pull-requests: write
+      actions: read
+    uses: tao-com-official/ci-workflows-public/.github/workflows/security-review.yml@PUBLIC_EXPORT_SHA # export of security-review-v0.2.0
+    with:
+      standalone: true
+      skip_paths: |
+        package-lock.json
+      runs_on: ubuntu-24.04
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
