@@ -21,6 +21,7 @@ jobs:
   security-scans:
     permissions:
       contents: read
-    uses: tao-com-official/ci-workflows-public/.github/workflows/security-scans.yml@a443501b93622507390d9307ab31d46060d090da # ci-workflows-public main (export of security-scans-v0.1.0)
+      pull-requests: read # funds-safety and dependencies look up approving reviews
+    uses: tao-com-official/ci-workflows-public/.github/workflows/security-scans.yml@a09c80dc62270acc656f5963e6687a89f6e27d5e # ci-workflows-public main (export of security-scans-v0.2.0)
     with:
       runs_on: ubuntu-24.04
