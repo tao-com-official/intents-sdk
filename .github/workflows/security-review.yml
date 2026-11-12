@@ -6,9 +6,6 @@
 # A fork's PR, and any run without CLAUDE_CODE_OAUTH_TOKEN (a Dependabot PR), fail the check with
 # the reason instead of skipping it: a maintainer reads the diff, pushes the branch into this repo
 # and opens a PR from it.
-#
-# PLACEHOLDER: replace PUBLIC_EXPORT_SHA with the ci-workflows-public commit that has the exported
-# workflows (its first export PR's merge commit). Until then this workflow can't run.
 name: security-review
 
 on:
@@ -28,7 +25,7 @@ jobs:
       contents: write # only its job that resolves fixed threads; GraphQL needs it
       pull-requests: write
       actions: read
-    uses: tao-com-official/ci-workflows-public/.github/workflows/security-review.yml@PUBLIC_EXPORT_SHA # export of security-review-v0.2.0
+    uses: tao-com-official/ci-workflows-public/.github/workflows/security-review.yml@a443501b93622507390d9307ab31d46060d090da # ci-workflows-public main (export of security-review-v0.2.0)
     with:
       standalone: true
       skip_paths: |
