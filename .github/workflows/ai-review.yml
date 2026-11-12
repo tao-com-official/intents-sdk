@@ -1,0 +1,70 @@
+# The AI code review and security review, from the shared workflows in tao-com-official/ci-workflows.
+# The reviews, their prompts and the posting rules live there; this file only says what to read from
+# this repo. The checks are `claude-review / review` and `security-review / review`.
+#
+# BLOCKED: this repo is public and ci-workflows is private, and GitHub won't let a public repo call a
+# reusable workflow from a private one. Don't merge until ci-workflows (or a public mirror of it)
+# can be called from here. Before then, the shared claude-review also needs to skip fork PRs, which
+# get no secrets here and would turn the check red.
+#
+# claude-code-review.yml stays for its dispatch mode only (a review of a pushed ref before any PR).
+name: AI review
+
+on:
+  pull_request:
+    # `labeled`: adding `ai:security-now` starts the security review before the code review is clean.
+    # On that run the code review reuses its review of the head SHA instead of running again.
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
+  issue_comment:
+    types: [created]
+  # For the merge queue once it's on. The called job skips there: the PR was reviewed before it
+  # queued.
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  claude-review:
+    # The most the called jobs can have. The AI review job asks for contents: read; only the job
+    # that resolves fixed threads uses contents: write, which GraphQL needs to resolve a thread.
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      actions: read
+    uses: tao-com-official/ci-workflows/.github/workflows/claude-review.yml@7ae5e02f5be1b15a7364cc661b5ce16971622d8e # security-review-v0.1.0
+    with:
+      # Read from the base branch, never the PR, so a PR can't rewrite the rules it's reviewed against.
+      review_docs: |
+        README.md
+        .agents/local-skills/pr-review/SKILL.md
+      skip_paths: |
+        package-lock.json
+      runs_on: blacksmith-2vcpu-ubuntu-2404
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+
+  # The AI security review, after the code review and on the same head SHA. It waits (fails with
+  # "Waits for the code review to pass") until the code review has no open Important findings,
+  # unless the PR has the label `ai:security-now` or its path floor is High. always() keeps it
+  # running when the code review failed, so the check is red rather than skipped. It reads this
+  # repo's rules from .github/security-review.md on the base branch.
+  security-review:
+    needs: claude-review
+    if: always()
+    permissions:
+      contents: write # only its job that resolves fixed threads; GraphQL needs it
+      pull-requests: write
+      actions: read
+    uses: tao-com-official/ci-workflows/.github/workflows/security-review.yml@7ae5e02f5be1b15a7364cc661b5ce16971622d8e # security-review-v0.1.0
+    with:
+      review_result: ${{ needs.claude-review.result }}
+      review_commit_sha: ${{ needs.claude-review.outputs.commit_sha }}
+      review_important: ${{ needs.claude-review.outputs.important }}
+      review_tier: ${{ needs.claude-review.outputs.tier }}
+      skip_paths: |
+        package-lock.json
+      runs_on: blacksmith-2vcpu-ubuntu-2404
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}

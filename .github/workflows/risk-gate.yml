@@ -1,0 +1,41 @@
+# The risk gate from tao-com-official/ci-workflows, in shadow mode: it labels the PR and reports
+# "would require N, has M" in a comment and the job summary, and always passes. The check is
+# `risk-gate / gate`; the path floor is .github/risk.yml on the base branch.
+#
+# BLOCKED, as ai-review.yml: this public repo can't call the private ci-workflows repo yet.
+name: risk-gate
+
+on:
+  pull_request:
+    # labeled/unlabeled: removing the display label just re-runs the gate. It never reads labels.
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
+  pull_request_review:
+    types: [submitted, dismissed]
+  merge_group:
+
+permissions: {}
+
+# Queue rather than cancel, so a review event can't cancel a push's classifier run.
+concurrency:
+  group: risk-gate-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  risk-gate:
+    uses: tao-com-official/ci-workflows/.github/workflows/risk-gate.yml@ffc7c17cc45a849a17d766a7dd7b1f9aa1101374 # risk-gate-v0.1.4
+    permissions:
+      actions: read # classifier and review verdicts, stored as artifacts
+      contents: read # .github/risk.yml from the base branch
+      pull-requests: write # the risk:* label and comment, display only
+      issues: write # create the risk:* labels
+    with:
+      # Shadow mode: reports "would require N, has M" and always passes. Set false to enforce.
+      shadow: true
+      # One slug or a comma-separated list. An author on any of these teams is trusted. intents-team
+      # because its members write and own this SDK.
+      trusted_team: devops,intents-team
+      # The CI reader app reads trusted_team membership (needs the Members: read org permission).
+      ci-reader-app-client-id: ${{ vars.CI_READER_APP_CLIENT_ID }}
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      ci-reader-app-private-key: ${{ secrets.CI_READER_APP_PRIVATE_KEY }}
