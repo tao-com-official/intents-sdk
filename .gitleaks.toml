@@ -1,0 +1,14 @@
+# Gitleaks config, read from the repo root by the security-scans workflow.
+# Start from Gitleaks' built-in rules and allow only these exact public values, which the
+# generic-api-key rule flags in the tests.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Public test fixtures"
+regexes = [
+  # //Alice's AccountId32 (her public key, the well-known Substrate dev account)
+  '''0xd43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d''',
+  # The USDC contract on Ethereum mainnet
+  '''(?i)0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48''',
+]

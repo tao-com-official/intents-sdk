@@ -1,0 +1,8 @@
+# zizmor configuration (https://docs.zizmor.sh/configuration/).
+rules:
+  dangerous-triggers:
+    ignore:
+      # issue_comment runs the review on a "@claude review this" comment, and only for an owner,
+      # member or collaborator (the job's `if`). The job never checks out or runs a fork's files; it
+      # only fetches the PR's merge commit for the diff, and reads its rules from the base branch.
+      - claude-code-review.yml
