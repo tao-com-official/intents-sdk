@@ -15,9 +15,11 @@ on:
 
 permissions: {}
 
-# Queue rather than cancel, so a review event can't cancel a push's classifier run.
+# One group per head SHA and event. A group holds one running and one pending run, and a newer
+# pending run cancels the older one, so a shared group would let a review event cancel a push's
+# classifier run.
 concurrency:
-  group: risk-gate-${{ github.event.pull_request.number || github.ref }}
+  group: risk-gate-${{ github.event.pull_request.head.sha || github.sha }}-${{ github.event_name }}
   cancel-in-progress: false
 
 jobs:
