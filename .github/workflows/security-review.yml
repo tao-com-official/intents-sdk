@@ -1,0 +1,41 @@
+# The AI security review, from the security-only public export of tao-com-official/ci-workflows
+# (tao-com-official/ci-workflows-public). The check is `security-review / review`. It reads this repo's
+# rules from .github/security-review.md on the base branch. This repo doesn't use the shared code
+# review or risk gate from ci-workflows, so the security review runs standalone.
+#
+# A fork's PR, and any run without CLAUDE_CODE_OAUTH_TOKEN (a Dependabot PR), fail the check with
+# the reason instead of skipping it: a maintainer reads the diff, pushes the branch into this repo
+# and opens a PR from it.
+name: security-review
+
+on:
+  pull_request:
+    # Only PRs into main, whose base has .github/security-review.md.
+    branches: [main]
+    # No issue_comment: a comment run checks out the PR's head with secrets, and reports on main's
+    # SHA, so it can't satisfy the required check. Re-run the job instead.
+    types: [opened, synchronize, reopened, ready_for_review]
+  # For the merge queue once it's on; the called job passes straight through there.
+  merge_group:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  security-review:
+    permissions:
+      # The most the called jobs can have. In the export, the AI review job asks for contents: read;
+      # only resolve-fixed-threads (no checkout, no AI, one artifact download) uses contents: write,
+      # which GraphQL resolveReviewThread needs.
+      contents: write
+      pull-requests: write
+      actions: read
+    uses: tao-com-official/ci-workflows-public/.github/workflows/security-review.yml@a443501b93622507390d9307ab31d46060d090da # ci-workflows-public main (export of security-review-v0.2.0)
+    with:
+      standalone: true
+      skip_paths: |
+        package-lock.json
+      runs_on: ubuntu-24.04
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
