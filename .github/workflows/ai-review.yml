@@ -15,8 +15,8 @@ on:
     # `labeled`: adding `ai:security-now` starts the security review before the code review is clean.
     # On that run the code review reuses its review of the head SHA instead of running again.
     types: [opened, synchronize, reopened, ready_for_review, labeled]
-  issue_comment:
-    types: [created]
+  # No issue_comment trigger, as in orders-sdk: a comment run checks out the PR's head (possibly a
+  # fork's) with secrets, and reports on main's SHA, so it can't satisfy the required check anyway.
   # For the merge queue once it's on. The called job skips there: the PR was reviewed before it
   # queued.
   merge_group:

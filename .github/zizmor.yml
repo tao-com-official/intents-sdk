@@ -1,8 +1,2 @@
 # zizmor configuration (https://docs.zizmor.sh/configuration/).
-rules:
-  dangerous-triggers:
-    ignore:
-      # issue_comment runs the review on a "@claude review this" comment from an owner, member or
-      # collaborator. The shared workflow checks out the PR's code without credentials to read it,
-      # never runs it, and reads its rules from the base branch.
-      - ai-review.yml
+rules: {}
