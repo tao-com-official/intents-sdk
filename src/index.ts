@@ -58,6 +58,7 @@ export type {
   PolkadotSignerOptions,
 } from "./substrate-signer";
 export { buildAttributionSuffix } from "./attribution";
+export { DEFAULT_AUTH_BASE_URL, type ApiKeyOptions } from "./api-key";
 export * from "./errors";
 export { intentsAbi, intentsAbi9737, TYPEHASH_16AE, TYPEHASH_9737 } from "./abi";
 export type { OrderTypehash } from "./abi";

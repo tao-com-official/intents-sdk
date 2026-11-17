@@ -1,5 +1,6 @@
 import type { Address } from "viem";
-import { AbortedError, QuoterError, type QuoterFailure } from "./errors";
+import { abortable } from "./abort";
+import { AbortedError, InvalidParamsError, QuoterError, type QuoterFailure } from "./errors";
 import type { QuoterRoute } from "./swap";
 import type { QuoterFees } from "./types";
 
@@ -41,6 +42,13 @@ export interface QuoterClientOptions {
   timeoutMs: number;
   /** Extra attempts for transient failures (503/504, network errors, solver fan-out failures). */
   retries: number;
+  /**
+   * Bearer token for the Quoter, read on every attempt (a function gets the caller's signal). Omitted: no
+   * `Authorization` header is sent.
+   */
+  auth?: string | ((signal?: AbortSignal) => string | Promise<string>);
+  /** Called when the Quoter answers 401 to a token, before one more attempt with a fresh one. */
+  onUnauthorized?: () => void;
 }
 
 const RETRY_DELAY_MS = 750;
@@ -60,10 +68,17 @@ export async function requestQuote(
   signal?: AbortSignal,
 ): Promise<QuoterResponse> {
   let attempt = 0;
+  let reauthorized = false;
   for (;;) {
     try {
       return await attemptQuote(request, opts, signal);
     } catch (error) {
+      // A revoked or rotated token: drop it and try once more with a fresh one.
+      if (error instanceof QuoterError && error.status === 401 && opts.onUnauthorized !== undefined && !reauthorized) {
+        reauthorized = true;
+        opts.onUnauthorized();
+        continue;
+      }
       if (!(error instanceof QuoterError) || !error.retryable || error.status === 429 || attempt >= opts.retries) {
         throw error;
       }
@@ -79,6 +94,10 @@ async function attemptQuote(
   signal?: AbortSignal,
 ): Promise<QuoterResponse> {
   if (signal?.aborted) throw new AbortedError();
+  // The token comes first, so a slow or failed login holds no timer or listener.
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  const authorization = await bearer(opts.auth, signal);
+  if (authorization !== undefined) headers.Authorization = authorization;
   const controller = new AbortController();
   let timedOut = false;
   const timer = setTimeout(() => {
@@ -92,7 +111,7 @@ async function attemptQuote(
   try {
     res = await opts.fetch(opts.url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify(request),
       signal: controller.signal,
     });
@@ -135,6 +154,14 @@ async function attemptQuote(
     });
   }
   return body;
+}
+
+/** The `Authorization` value from `auth`, which the caller's signal can stop waiting for. */
+async function bearer(auth: QuoterClientOptions["auth"], signal: AbortSignal | undefined): Promise<string | undefined> {
+  if (auth === undefined) return undefined;
+  const token = typeof auth === "function" ? await abortable(Promise.resolve(auth(signal)), signal) : auth;
+  if (typeof token !== "string" || token === "") throw new InvalidParamsError("`auth` gave an empty token.");
+  return `Bearer ${token}`;
 }
 
 function toQuoterError(status: number, body: unknown, text: string): QuoterError {
