@@ -67,7 +67,8 @@ import { SettlerRegistry, type SettlerChain } from "./deployments";
 import { buildOrder, buildOrder9737, encodeTransferTao, type OrderSwap } from "./order-data";
 import { Order, type OrderContext, type OrderRef } from "./order";
 import { encodeSs58, parseSubstrateAddress } from "./substrate";
-import { requestQuote, type QuoterRequest, type QuoterResponse } from "./quoter";
+import { requestQuote, type QuoterClientOptions, type QuoterRequest, type QuoterResponse } from "./quoter";
+import { createApiKeyTokenSource, type ApiKeyOptions } from "./api-key";
 import type { SubstrateBatchResult, SubstrateCall, SubstrateSigner } from "./substrate-signer";
 import { applySlippage, resolveSwapEstimate, usdToUsdc, type SwapEstimate } from "./swap";
 import type { CallOptions, InputKind, Quote, QuoteParams, TokenInput, WalletLike } from "./types";
@@ -87,6 +88,21 @@ export interface TaoIntentsOptions {
   quoterUrl?: string;
   /** Custom `fetch` (defaults to the global one). */
   fetch?: typeof fetch;
+  /**
+   * Your TAO.com API key from the partner dashboard. The SDK gets an access token for it and sends it with every
+   * quote request.
+   */
+  apiKey?: ApiKeyOptions;
+  /**
+   * Your partner ID from the TAO.com partner dashboard. `open`/`execute` write it on chain as an ERC-8021 suffix,
+   * which is how TAO.com attributes intents to you, unless a call passes its own `partnerId`.
+   */
+  partnerId?: string;
+  /**
+   * An access token you obtained yourself, sent to the Quoter as `Authorization: Bearer` (a function is called
+   * per request). Use `apiKey` instead unless you manage tokens elsewhere; do not pass both.
+   */
+  auth?: string | ((signal?: AbortSignal) => string | Promise<string>);
   /**
    * Ask the Quoter which FullSettler each chain runs (one indicative quote per chain, the first time the chain is
    * used), so the SDK follows a settler migration on its own. Chains whose `intents` you set in `chains` are never
@@ -117,8 +133,9 @@ interface OpenParamsBase extends CallOptions {
   /** Refuse to send if the quote's output is below this (base units of the output token). */
   minOutputAmount?: bigint;
   /**
-   * Attribution code (e.g. your app's builder code). Appended to the `open` transaction's calldata as an
-   * ERC-8021 suffix so the order can be attributed to you. Printable ASCII, no commas or spaces.
+   * Your partner ID from the TAO.com partner dashboard. Defaults to the client's `partnerId`. Appended to the
+   * `open` transaction's calldata as an ERC-8021 suffix so the intent is attributed to you. Printable ASCII, no
+   * commas or spaces.
    */
   partnerId?: string;
   /**
@@ -293,7 +310,8 @@ function assertSlippageBps(value: number, name: string): void {
  */
 export class TaoIntents {
   readonly #chains: Record<number, ChainConfig>;
-  readonly #quoter: { url: string; fetch: typeof fetch; timeoutMs: number; retries: number };
+  readonly #quoter: QuoterClientOptions;
+  readonly #defaultPartnerId: string | undefined;
   readonly #clients = new Map<number, PublicClient>();
   readonly #settlers: SettlerRegistry;
   /** By settler address: a migration brings a new type hash. */
@@ -305,12 +323,25 @@ export class TaoIntents {
 
   constructor(options: TaoIntentsOptions = {}) {
     this.#chains = buildChains(options.chains, options.rpcUrls);
+    if (options.apiKey !== undefined && options.auth !== undefined) {
+      throw new InvalidParamsError("Pass either `apiKey` or `auth`, not both.");
+    }
+    const fetchFn: typeof fetch = options.fetch ?? ((...args) => globalThis.fetch(...args));
+    const nowSeconds = options.now ?? (() => Math.floor(Date.now() / 1000));
+    const tokens =
+      options.apiKey !== undefined ? createApiKeyTokenSource(options.apiKey, fetchFn, () => nowSeconds() * 1000) : undefined;
+    let quoterAuth: Pick<QuoterClientOptions, "auth" | "onUnauthorized"> = {};
+    if (tokens !== undefined) quoterAuth = { auth: (signal) => tokens.getToken(signal), onUnauthorized: () => tokens.invalidate() };
+    else if (options.auth !== undefined) quoterAuth = { auth: options.auth };
     this.#quoter = {
       url: options.quoterUrl ?? DEFAULT_QUOTER_URL,
-      fetch: options.fetch ?? ((...args) => globalThis.fetch(...args)),
+      fetch: fetchFn,
       timeoutMs: options.quoterTimeoutMs ?? 15_000,
       retries: options.quoterRetries ?? 1,
+      ...quoterAuth,
     };
+    if (options.partnerId !== undefined) buildAttributionSuffix(options.partnerId); // validates it up front
+    this.#defaultPartnerId = options.partnerId;
     const pinned = Object.entries(options.chains ?? {}).filter(([, o]) => o.intents !== undefined).map(([id]) => Number(id));
     this.#settlers = new SettlerRegistry({
       lookup: options.settlerLookup === false ? undefined : (chain) => this.#lookupSettler(chain),
@@ -323,7 +354,7 @@ export class TaoIntents {
         `\`fillWindowSeconds\` must be between ${MIN_FILL_WINDOW_SECONDS} and ${MAX_FILL_WINDOW_SECONDS}.`,
       );
     }
-    this.#now = options.now ?? (() => Math.floor(Date.now() / 1000));
+    this.#now = nowSeconds;
     for (const [id, client] of Object.entries(options.publicClients ?? {})) this.#clients.set(Number(id), client);
     this.#ctx = {
       getPublicClient: (chainId) => this.#publicClient(chainId),
@@ -648,7 +679,7 @@ export class TaoIntents {
     if (params.substrate) return this.#openFromSubstrate(params);
     const { quote, onProgress, signal } = params;
     throwIfAborted(signal);
-    const dataSuffix = params.partnerId === undefined ? undefined : buildAttributionSuffix(params.partnerId);
+    const dataSuffix = this.#attributionSuffix(params.partnerId);
     const swapSlippageBps = params.swapSlippageBps ?? DEFAULT_SWAP_SLIPPAGE_BPS;
     assertSlippageBps(swapSlippageBps, "swapSlippageBps");
     if (!quote.user || !quote.recipient) throw new IndicativeQuoteError();
@@ -1144,10 +1175,16 @@ export class TaoIntents {
     return { order, value, fillDeadline };
   }
 
+  /** ERC-8021 suffix for `open`: the call's `partnerId`, else the client's. Undefined when there is none. */
+  #attributionSuffix(partnerId: string | undefined): Hex | undefined {
+    const code = partnerId ?? this.#defaultPartnerId;
+    return code === undefined ? undefined : buildAttributionSuffix(code);
+  }
+
   async #openFromSubstrate(params: SubstrateOpenParams): Promise<SubstrateOpenResult> {
     const { quote, substrate, onProgress, signal } = params;
     throwIfAborted(signal);
-    const dataSuffix = params.partnerId === undefined ? undefined : buildAttributionSuffix(params.partnerId);
+    const dataSuffix = this.#attributionSuffix(params.partnerId);
     const swapSlippageBps = params.swapSlippageBps ?? DEFAULT_SWAP_SLIPPAGE_BPS;
     assertSlippageBps(swapSlippageBps, "swapSlippageBps");
     if (!quote.user || !quote.recipient) throw new IndicativeQuoteError();

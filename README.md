@@ -74,12 +74,49 @@ await intents.execute({
 Pass a single code and the SDK appends an [ERC-8021](https://eip.tools/eip/8021) (schema 0) suffix to the `open`
 transaction's calldata, so the order can be attributed to your app. Works on `execute` and `open`.
 
+Use your **partner ID** from the TAO.com partner dashboard. Set it once on the client (below) or per call; a
+call's own `partnerId` overrides the client's.
+
 ```ts
-await intents.execute({ ..., partnerId: "my-app" });
+await intents.execute({ ..., partnerId: process.env.TAO_PARTNER_ID });
 ```
 
 The code must be printable ASCII with no spaces or commas (max 100 chars), otherwise `InvalidParamsError`
 is thrown before anything is signed. `buildAttributionSuffix(code)` is exported if you need the raw suffix.
+
+### API key and partner ID
+
+If you build an app on TAO.com, create an API key and get your partner ID in the TAO.com partner dashboard. The
+Quoter will require the key: the SDK authenticates every quote request with it. The partner ID is what attributes your
+intents to you: every intent you open carries it as the ERC-8021 suffix above.
+
+On a server:
+
+```ts
+const intents = new TaoIntents({
+  apiKey: {
+    apiKey: process.env.TAO_API_KEY!,
+    apiSecret: process.env.TAO_API_SECRET!,
+    // authBaseUrl: "https://api.dev.tao.com",   // testnet; must be HTTPS. Default: DEFAULT_AUTH_BASE_URL (https://api.tao.com)
+  },
+  partnerId: process.env.TAO_PARTNER_ID,
+});
+```
+
+The SDK logs in at `POST /auth`, keeps the token until 30 s before it expires, and shares one login between concurrent
+quotes. If the Quoter refuses the token (a revoked or rotated key), it logs in again and retries once. A wrong or
+revoked key throws `ApiKeyAuthError` (`API_KEY_AUTH_FAILED`).
+
+`apiKey` works on a server only: in a browser the secret would be visible to your users, so the SDK refuses to start
+with it there. A browser app gets the token from its own backend and passes `auth`, a function the SDK calls before
+every quote request:
+
+```ts
+const intents = new TaoIntents({
+  auth: () => fetch("/api/tao-token").then((r) => r.text()),
+  partnerId: "<your partner ID>",
+});
+```
 
 ### Cancelling
 

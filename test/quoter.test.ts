@@ -23,6 +23,34 @@ describe("requestQuote", () => {
     expect(JSON.parse(init.body as string)).toEqual(request);
   });
 
+  it("sends no Authorization header without auth", async () => {
+    const f = vi.fn(async () => jsonResponse(quoterBody()));
+    await requestQuote(request, opts(f as never));
+    const [, init] = f.mock.calls[0] as unknown as [string, RequestInit];
+    expect(init.headers).toEqual({ "Content-Type": "application/json" });
+  });
+
+  it("sends the auth token as a bearer, reading a function on every request", async () => {
+    const f = vi.fn(async () => jsonResponse(quoterBody()));
+    let n = 0;
+    const auth = vi.fn(async () => `token-${++n}`);
+    await requestQuote(request, { ...opts(f as never), auth });
+    await requestQuote(request, { ...opts(f as never), auth });
+    await requestQuote(request, { ...opts(f as never), auth: "static" });
+    const headers = f.mock.calls.map((c) => (c as unknown as [string, RequestInit])[1].headers);
+    expect(headers).toEqual([
+      { "Content-Type": "application/json", Authorization: "Bearer token-1" },
+      { "Content-Type": "application/json", Authorization: "Bearer token-2" },
+      { "Content-Type": "application/json", Authorization: "Bearer static" },
+    ]);
+  });
+
+  it("refuses an empty token instead of sending no Authorization", async () => {
+    const f = vi.fn(async () => jsonResponse(quoterBody()));
+    await expect(requestQuote(request, { ...opts(f as never), auth: async () => "" })).rejects.toMatchObject({ code: "INVALID_PARAMS" });
+    expect(f).not.toHaveBeenCalled();
+  });
+
   it("maps API errors to QuoterError with useful fields", async () => {
     const f = vi.fn(async () => jsonResponse({ error: "SETTLER_PAUSED" }, 503));
     const err = await requestQuote(request, opts(f as never)).catch((e) => e);

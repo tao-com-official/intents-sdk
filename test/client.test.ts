@@ -1,6 +1,6 @@
 import { BaseError, ContractFunctionRevertedError, type Hex } from "viem";
 import { describe, expect, it, vi } from "vitest";
-import { TaoIntents, type ProgressEvent } from "../src";
+import { buildAttributionSuffix, TaoIntents, type ApiKeyOptions, type ProgressEvent } from "../src";
 import { decodeAbiParameters, encodeAbiParameters } from "viem";
 import { inputOrderDataParams, subtensorDataParams } from "../src/abi";
 import { encodeSs58, parseSubstrateAddress } from "../src/substrate";
@@ -8,7 +8,7 @@ import { ETH_INTENTS, jsonResponse, mockPublicClient, mockWalletClient, NOW, ope
 
 const OUT_NATIVE = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE";
 
-function setup(opts: { origin?: Parameters<typeof mockPublicClient>[0]; fetchImpl?: unknown; now?: () => number } = {}) {
+function setup(opts: { origin?: Parameters<typeof mockPublicClient>[0]; fetchImpl?: unknown; now?: () => number; apiKey?: ApiKeyOptions; partnerId?: string; auth?: string } = {}) {
   const origin = mockPublicClient({
     logs: [openLog({ fillDeadline: NOW + 300, destinationChainId: 964 })],
     ...opts.origin,
@@ -20,6 +20,9 @@ function setup(opts: { origin?: Parameters<typeof mockPublicClient>[0]; fetchImp
     fetch: fetchMock as never,
     publicClients: { 1: origin.client as never, 964: dest.client as never },
     now: opts.now ?? (() => NOW),
+    ...(opts.apiKey ? { apiKey: opts.apiKey } : {}),
+    ...(opts.partnerId ? { partnerId: opts.partnerId } : {}),
+    ...(opts.auth ? { auth: opts.auth } : {}),
   });
   return { sdk, origin, dest, fetchMock };
 }
@@ -619,5 +622,132 @@ describe("Subnet alpha output", () => {
   it("rejects alphaHotkey for other outputs", async () => {
     const { sdk } = setup();
     await expect(sdk.getQuote({ ...base, outputToken: "TAO", alphaHotkey: HOTKEY_SS58 })).rejects.toThrow("alphaHotkey");
+  });
+});
+
+describe("API key", () => {
+  const PARTNER = "dcc91db5-f083-4672-b929-834695ceef92";
+  const AUTH_ORIGIN = "https://auth.test";
+  const KEY = { apiKey: crypto.randomUUID(), apiSecret: "secret", authBaseUrl: AUTH_ORIGIN };
+  const isAuth = (url: string) => new URL(url).origin === AUTH_ORIGIN;
+
+  /** Auth service and Quoter behind one fetch: records what each was sent. */
+  function services(handlers: { login?: () => Response | Promise<Response>; quote?: (n: number) => Response } = {}) {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    let logins = 0;
+    let quotes = 0;
+    const fetchImpl = async (url: string, init: RequestInit) => {
+      calls.push({ url, init });
+      if (isAuth(url)) {
+        logins += 1;
+        return (await handlers.login?.()) ?? jsonResponse({ access_token: `key-token-${logins}`, refresh_token: "r", token_type: "Bearer", expires_in: 1800 });
+      }
+      quotes += 1;
+      return handlers.quote?.(quotes) ?? jsonResponse(quoterBody());
+    };
+    const authorizations = () =>
+      calls.filter((c) => !isAuth(c.url)).map((c) => (c.init.headers as Record<string, string>).Authorization);
+    return { fetchImpl, calls, authCalls: () => calls.filter((c) => isAuth(c.url)), authorizations };
+  }
+
+  it("logs in with the key once and sends its token with every quote", async () => {
+    const { fetchImpl, authCalls, authorizations } = services();
+    const { sdk } = setup({ fetchImpl, apiKey: KEY });
+    await sdk.getQuote({ ...EXEC, user: USER });
+    await sdk.getQuote({ ...EXEC, user: USER });
+
+    expect(authCalls().map((c) => c.url)).toEqual([`${AUTH_ORIGIN}/auth`]);
+    expect(JSON.parse(String(authCalls()[0]!.init.body))).toEqual({ type: "API_KEY", username: KEY.apiKey, password: "secret" });
+    expect(authorizations()).toEqual(["Bearer key-token-1", "Bearer key-token-1"]);
+  });
+
+  it("keeps the token until 30 s before it expires, on the client's clock", async () => {
+    let t = NOW;
+    const { fetchImpl, authorizations } = services();
+    const { sdk } = setup({ fetchImpl, apiKey: KEY, now: () => t });
+    await sdk.getQuote({ ...EXEC, user: USER });
+    t = NOW + 1800 - 31;
+    await sdk.getQuote({ ...EXEC, user: USER });
+    t = NOW + 1800 - 30;
+    await sdk.getQuote({ ...EXEC, user: USER });
+
+    expect(authorizations()).toEqual(["Bearer key-token-1", "Bearer key-token-1", "Bearer key-token-2"]);
+  });
+
+  it("shares one login between concurrent quotes", async () => {
+    const { fetchImpl, authCalls } = services();
+    const { sdk } = setup({ fetchImpl, apiKey: KEY });
+    await Promise.all([sdk.getQuote({ ...EXEC, user: USER }), sdk.getQuote({ ...EXEC, user: USER })]);
+    expect(authCalls()).toHaveLength(1);
+  });
+
+  it("drops a token the Quoter refuses and retries once with a fresh one", async () => {
+    const { fetchImpl, authorizations } = services({ quote: (n) => (n === 1 ? jsonResponse({ error: "INVALID_API_KEY" }, 401) : jsonResponse(quoterBody())) });
+    const { sdk } = setup({ fetchImpl, apiKey: KEY });
+    await sdk.getQuote({ ...EXEC, user: USER });
+    expect(authorizations()).toEqual(["Bearer key-token-1", "Bearer key-token-2"]);
+  });
+
+  it("gives up after the fresh token is refused too", async () => {
+    const { fetchImpl, authorizations } = services({ quote: () => jsonResponse({ error: "INVALID_API_KEY" }, 401) });
+    const { sdk } = setup({ fetchImpl, apiKey: KEY });
+    await expect(sdk.getQuote({ ...EXEC, user: USER })).rejects.toMatchObject({ status: 401 });
+    expect(authorizations()).toHaveLength(2);
+  });
+
+  it("stops waiting for a hung login when the caller aborts", async () => {
+    const { fetchImpl } = services({ login: () => new Promise<Response>(() => {}) });
+    const { sdk } = setup({ fetchImpl, apiKey: KEY });
+    const controller = new AbortController();
+    const pending = sdk.getQuote({ ...EXEC, user: USER }, { signal: controller.signal });
+    controller.abort();
+    await expect(pending).rejects.toMatchObject({ code: "ABORTED" });
+  });
+
+  it("stops waiting for a hung auth function when the caller aborts", async () => {
+    const { fetchImpl, calls } = services();
+    const sdkWithAuth = new TaoIntents({ settlerLookup: false, fetch: fetchImpl as never, auth: () => new Promise<string>(() => {}) });
+    const controller = new AbortController();
+    const pending = sdkWithAuth.getQuote({ ...EXEC, user: USER }, { signal: controller.signal });
+    controller.abort();
+    await expect(pending).rejects.toMatchObject({ code: "ABORTED" });
+    expect(calls).toHaveLength(0);
+  });
+
+  it("sends a token passed as auth", async () => {
+    const { fetchImpl, authorizations } = services();
+    const { sdk } = setup({ fetchImpl, auth: "own-token" });
+    await sdk.getQuote({ ...EXEC, user: USER });
+    expect(authorizations()).toEqual(["Bearer own-token"]);
+  });
+
+  it("writes the client's partner ID as the ERC-8021 suffix, and a call's own overrides it", async () => {
+    const { fetchImpl } = services();
+    const { sdk } = setup({ fetchImpl, apiKey: KEY, partnerId: PARTNER, origin: { allowance: 10n ** 12n } });
+    const wallet = mockWalletClient();
+    const quote = await sdk.getQuote({ ...EXEC, user: USER });
+    await sdk.open({ quote, wallet: wallet as never });
+    await sdk.open({ quote: await sdk.getQuote({ ...EXEC, user: USER }), wallet: wallet as never, partnerId: "other-app" });
+    const suffixes = [0, 1].map((i) => (call(wallet, i) as unknown as { dataSuffix: string }).dataSuffix);
+    expect(suffixes[0]).toBe(buildAttributionSuffix(PARTNER));
+    expect(suffixes[1]).toBe(buildAttributionSuffix("other-app"));
+  });
+
+  it("validates the client's partner ID up front", () => {
+    expect(() => new TaoIntents({ partnerId: "a,b" })).toThrow("`partnerId`");
+  });
+
+  it("surfaces a refused key", async () => {
+    const { fetchImpl } = services({ login: () => jsonResponse({ error: "invalid_client", error_description: "bad credentials" }, 401) });
+    const { sdk } = setup({ fetchImpl, apiKey: KEY });
+    await expect(sdk.getQuote({ ...EXEC, user: USER })).rejects.toMatchObject({
+      code: "API_KEY_AUTH_FAILED",
+      status: 401,
+      message: expect.stringContaining("bad credentials"),
+    });
+  });
+
+  it("refuses apiKey together with auth", () => {
+    expect(() => new TaoIntents({ apiKey: KEY, auth: "token" })).toThrow("either `apiKey` or `auth`");
   });
 });

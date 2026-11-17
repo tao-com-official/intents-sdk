@@ -5,6 +5,7 @@ export type TaoIntentsErrorCode =
   | "QUOTER_ERROR"
   | "QUOTER_FORBIDDEN"
   | "QUOTER_UNREACHABLE"
+  | "API_KEY_AUTH_FAILED"
   | "QUOTE_EXPIRED"
   | "INDICATIVE_QUOTE"
   | "INSUFFICIENT_BALANCE"
@@ -45,6 +46,15 @@ export function isTaoIntentsError(error: unknown): error is TaoIntentsError {
 export class InvalidParamsError extends TaoIntentsError {
   constructor(message: string) {
     super("INVALID_PARAMS", message);
+  }
+}
+
+/** The TAO.com auth service refused the API key (`status` 401: wrong key or secret, or a revoked key). */
+export class ApiKeyAuthError extends TaoIntentsError {
+  readonly status: number | undefined;
+  constructor(message: string, options: { status?: number; cause?: unknown } = {}) {
+    super("API_KEY_AUTH_FAILED", message, { cause: options.cause });
+    this.status = options.status;
   }
 }
 
